@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Inspect','InspectAuthorization','InspectBff','VerifyBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember')][string]$Action = 'Inspect',
+  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectBff','InspectMembers','VerifyBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -33,6 +33,15 @@ if (!$taskToken) { throw 'Authenticated Supabase CLI credential unavailable.' }
 $taskHeaders = @{ Authorization = "Bearer $taskToken" }
 $proRef = 'ckbftoopuyophiebamwy'
 $bffRef = 'bksbwnxdurmuolygiofh'
+if ($Action -eq 'InspectConsent') {
+  if (!$Login) { throw 'Provide the account email to inspect.' }
+  $taskExpectedLogin = $Login.Trim().Replace("'", "''")
+  $taskClientId = ([IO.File]::ReadAllLines((Join-Path (Get-Location) '.env.local')) | Where-Object { $_.StartsWith('BFF_AUTH_CLIENT_ID=') }) -replace '^BFF_AUTH_CLIENT_ID=', ''
+  if ($taskClientId -notmatch '^[a-fA-F0-9-]{36}$') { throw 'Configured OAuth client identifier is invalid.' }
+  $taskQuery = "select exists(select 1 from auth.oauth_consents c join auth.users u on u.id=c.user_id where lower(u.email)=lower('$taskExpectedLogin') and c.client_id::text='$taskClientId' and c.revoked_at is null and string_to_array(c.scopes,' ') @> array['email','profile']) as already_authorized"
+  Invoke-RestMethod -Method Post -Uri "https://api.supabase.com/v1/projects/$proRef/database/query" -Headers $taskHeaders -ContentType 'application/json' -Body (@{query=$taskQuery} | ConvertTo-Json -Compress) | ConvertTo-Json -Depth 5
+  exit
+}
 if ($Action -eq 'InspectAuthorization') {
   $taskQuery = "select table_name,column_name from information_schema.columns where table_schema='auth' and table_name like '%authoriz%' order by table_name,ordinal_position"
   $taskColumns = Invoke-RestMethod -Method Post -Uri "https://api.supabase.com/v1/projects/$proRef/database/query" -Headers $taskHeaders -ContentType 'application/json' -Body (@{query=$taskQuery} | ConvertTo-Json -Compress)
@@ -57,6 +66,10 @@ if ($Action -eq 'InspectAuthorization') {
 }
 function Invoke-BffQuery([string]$Query) {
   Invoke-RestMethod -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json' -Body (@{query=$Query} | ConvertTo-Json -Compress)
+}
+if ($Action -eq 'InspectMembers') {
+  Invoke-BffQuery "select m.email,m.display_name,m.role,m.enabled,count(am.application_id)::integer as application_grants from public.bff_members m left join public.bff_application_members am on am.member_id=m.id group by m.id order by m.created_at,m.email" | ConvertTo-Json -Depth 5
+  exit
 }
 if ($Action -eq 'VerifyBff') {
   Invoke-BffQuery (Get-Content -Raw -LiteralPath 'tests/integration/database-security.sql') | ConvertTo-Json -Depth 5
