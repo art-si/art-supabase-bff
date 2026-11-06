@@ -15,6 +15,7 @@
     "typecheck:server": "tsc --project tsconfig.server.json --noEmit --pretty false",
     "typecheck:client": "tsx vite.config.ts --typecheck",
     "test:unit": "tsx --test tests/unit/*.test.ts",
+    "test:e2e": "playwright test --config tests/playwright.config.ts",
     "verify:bundle": "tsx tests/integration/browser-bundle-security.ts",
     "ui:audit": "tsx node_modules/art-supabase-pro/scripts/ui-audit.ts",
     "lint": "eslint src server tests vite.config.ts",
@@ -27,7 +28,7 @@
   },
   "dependencies": {
     "@vueuse/core": "^15.0.0",
-    "art-supabase-pro": "https://gitee.com/art-si/art-supabase-pro/repository/archive/57c5f1ab0444265a04ad817019dc9439f0ef2fc8.tar.gz",
+    "art-supabase-pro": "https://gitee.com/art-si/art-supabase-pro/repository/archive/c249dfa358eee3a6f263efad13a33bf53d806614.tar.gz",
     "openid-client": "6.8.9",
     "lodash-es": "^4.18.1",
     "@supabase/supabase-js": "^2.117.3",

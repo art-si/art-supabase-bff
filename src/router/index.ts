@@ -18,6 +18,7 @@ registerApplicationViewModules(
 )
 registerApplicationViewModules('shared', '/shared', {
   '/shared/system/menu.vue': () => import('@/views/system/menu/index.vue'),
+  '/shared/system/role.vue': () => import('@/views/system/role/index.vue'),
   '/shared/data-center/dict.vue': () => import('@/views/data-center/dict/index.vue')
 })
 
@@ -86,7 +87,8 @@ export function initRouter(app: App<Element>): void {
         menuStore.setMenuList(menus)
         registry.register(menus)
         useWorktabStore().validateWorktabs(router)
-        return { path: to.path === '/' ? menuStore.getHomePath() : to.fullPath, replace: true }
+        // Match pro's route replay: Vue Router 5 drops embedded query strings in path objects.
+        return to.path === '/' ? menuStore.getHomePath() : to.fullPath
       }
       if (to.path === '/') return menuStore.getHomePath()
       return true

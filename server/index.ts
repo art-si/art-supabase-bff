@@ -23,6 +23,7 @@ import {
   tableColumnRuntime
 } from './control-plane'
 import { database } from './database/client'
+import { readRoles, writeRole, roleAssignments, readMembers, writeMember } from './access-control'
 import TreeUtils from 'art-supabase-pro/src/utils/tree.ts'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 
@@ -73,12 +74,42 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
         },
         csrfToken: session.row.csrf_token,
         permissions: permissions.data,
-        menu: new TreeUtils({ parentKey: 'parentId' }).listToTree(nodes)
+        menu: new TreeUtils({ parentKey: 'parentId' }).listToTree(
+          nodes.map((node) =>
+            node.component === '/shared/system/role'
+              ? { ...node, props: { organizationScope: false } }
+              : node
+          )
+        )
       })
       return
     }
     if (url.pathname === '/api/control/menus' && req.method === 'GET') {
       json(res, await readMenus(session, url.searchParams.get('catalog') === '1'))
+      return
+    }
+    if (url.pathname === '/api/control/roles' && (req.method === 'GET' || req.method === 'POST')) {
+      json(res, req.method === 'GET' ? await readRoles(session) : await writeRole(req, session))
+      return
+    }
+    const roleResource = /^\/api\/control\/roles\/([^/]+)\/(menus|users)$/.exec(url.pathname)
+    if (roleResource && (req.method === 'GET' || req.method === 'POST')) {
+      json(
+        res,
+        await roleAssignments(
+          req,
+          session,
+          roleResource[1],
+          roleResource[2] === 'menus' ? 'menus' : 'users'
+        )
+      )
+      return
+    }
+    if (
+      url.pathname === '/api/control/members' &&
+      (req.method === 'GET' || req.method === 'POST')
+    ) {
+      json(res, req.method === 'GET' ? await readMembers(session) : await writeMember(req, session))
       return
     }
     if (url.pathname === '/api/control/dictionaries' && req.method === 'GET') {
@@ -238,6 +269,12 @@ const server = createServer((req, res) => {
     '.css': 'text/css',
     '.svg': 'image/svg+xml',
     '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.ico': 'image/x-icon',
+    '.woff': 'font/woff',
     '.woff2': 'font/woff2',
     '.json': 'application/json'
   }

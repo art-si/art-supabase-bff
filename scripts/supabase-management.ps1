@@ -83,7 +83,7 @@ function Invoke-BffQuery([string]$Query) {
   return $taskResult
 }
 if ($Action -in @('ValidateBffSchema','ApplyCanonicalBff')) {
-  $taskSql = Get-Content -Raw -LiteralPath 'server/database/schema.sql'
+  $taskSql = Get-Content -Raw -Encoding UTF8 -LiteralPath 'server/database/schema.sql'
   if ($taskSql -notmatch 'exclusively for project bksbwnxdurmuolygiofh' -or $taskSql -notmatch 'begin;' -or $taskSql -notmatch 'commit;\s*$') {
     throw 'The canonical BFF schema must declare its project and one complete transaction.'
   }
@@ -144,10 +144,12 @@ select jsonb_build_object(
     if (@($taskBackup.tables.$taskName).Count -ne [int]$taskDatabaseSnapshot.rowCounts.$taskName) { throw 'BFF recovery row counts do not match.' }
   }
   $taskVerification = ''
-  $taskVerificationPath = 'tests/integration/control-plane-schema.sql'
-  if (Test-Path -LiteralPath $taskVerificationPath) {
-    $taskVerification = Get-Content -Raw -LiteralPath $taskVerificationPath
-    if ($taskVerification -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }
+  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql')) {
+    if (Test-Path -LiteralPath $taskVerificationPath) {
+      $taskVerificationPart = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskVerificationPath
+      if ($taskVerificationPart -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }
+      $taskVerification += "`n" + $taskVerificationPart
+    }
   }
   $taskCommit = [regex]::Match($taskSql, 'commit;\s*$')
   $taskValidationSql = $taskSql.Substring(0,$taskCommit.Index) + $taskVerification + "`nset constraints all immediate; rollback;"

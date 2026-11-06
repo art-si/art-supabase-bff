@@ -13,6 +13,10 @@ create table if not exists public.bff_members (
   unique (issuer,subject)
 );
 create index if not exists bff_members_tenant_idx on public.bff_members(tenant_id);
+alter table public.bff_members add column if not exists version integer not null default 1 check (version > 0);
+alter table public.bff_members add column if not exists updated_at timestamptz not null default now();
+alter table public.bff_members add column if not exists updated_by uuid references public.bff_members(id);
+create index if not exists bff_members_updater_idx on public.bff_members(updated_by);
 create table if not exists public.bff_applications (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null,
@@ -64,6 +68,19 @@ create index if not exists bff_audit_tenant_created_idx on public.bff_audit_even
 
 -- Control-plane records follow pro's menu/dictionary DTOs; identity stays in pro Auth.
 create unique index if not exists bff_members_id_tenant_uidx on public.bff_members(id,tenant_id);
+create unique index if not exists bff_applications_id_tenant_uidx on public.bff_applications(id,tenant_id);
+alter table public.bff_application_members add column if not exists tenant_id uuid;
+update public.bff_application_members am set tenant_id=a.tenant_id from public.bff_applications a where a.id=am.application_id and am.tenant_id is null;
+alter table public.bff_application_members alter column tenant_id set not null;
+do $$ begin
+  if not exists(select 1 from pg_constraint where conrelid='public.bff_application_members'::regclass and conname='bff_application_member_tenant_fk') then
+    alter table public.bff_application_members add constraint bff_application_member_tenant_fk foreign key(member_id,tenant_id) references public.bff_members(id,tenant_id);
+    alter table public.bff_application_members add constraint bff_application_scope_fk foreign key(application_id,tenant_id) references public.bff_applications(id,tenant_id);
+    alter table public.bff_application_members add constraint bff_application_grant_actor_fk foreign key(created_by,tenant_id) references public.bff_members(id,tenant_id);
+  end if;
+end $$;
+create index if not exists bff_application_member_tenant_idx on public.bff_application_members(tenant_id,member_id);
+create index if not exists bff_application_grant_actor_idx on public.bff_application_members(created_by,tenant_id);
 create table if not exists public.bff_resource_revisions (
   tenant_id uuid not null,
   resource text not null check (resource in ('menus','dictionaries','roles','members')),
@@ -402,7 +419,7 @@ declare tenant uuid; result jsonb;
 begin
   select tenant_id into tenant from public.bff_members where id=p_actor and enabled;
   if tenant is null or not (public.bff_actor_can(p_actor,'System:Menu:View') or
-    (p_catalog and public.bff_actor_can(p_actor,'System:Role:Edit')))
+    (p_catalog and public.bff_actor_can(p_actor,'System:Role:AssignPermission')))
   then raise exception 'BFF_FORBIDDEN'; end if;
   select jsonb_build_object('revision',coalesce((select version from public.bff_resource_revisions where tenant_id=tenant and resource='menus'),1),
     'records',coalesce(jsonb_agg(jsonb_build_object('id',n.id,'parentId',n.parent_id,'name',n.name,'type',n.type,
@@ -569,6 +586,200 @@ end $$;
 revoke all on function public.bff_read_menus(uuid,boolean),public.bff_write_menu(uuid,text,jsonb,bigint),public.bff_read_dictionaries(uuid,boolean),public.bff_write_dictionary(uuid,text,text,jsonb,bigint) from public,anon,authenticated;
 grant execute on function public.bff_read_menus(uuid,boolean),public.bff_write_menu(uuid,text,jsonb,bigint),public.bff_read_dictionaries(uuid,boolean),public.bff_write_dictionary(uuid,text,text,jsonb,bigint) to service_role;
 
+-- Membership identity is established only by the verified pro onboarding path.
+create or replace function public.bff_guard_member_identity()
+returns trigger language plpgsql security invoker set search_path='' as $$
+begin
+  if NEW.id is distinct from OLD.id or NEW.tenant_id is distinct from OLD.tenant_id or
+    NEW.issuer is distinct from OLD.issuer or NEW.subject is distinct from OLD.subject or NEW.created_at is distinct from OLD.created_at
+  then raise exception using errcode='23514',message='BFF_MEMBER_IDENTITY_IMMUTABLE'; end if;
+  if NEW.updated_by is not null and not exists(select 1 from public.bff_members where id=NEW.updated_by and tenant_id=NEW.tenant_id)
+  then raise exception using errcode='23514',message='BFF_MEMBER_ACTOR_SCOPE_INVALID'; end if;
+  return NEW;
+end $$;
+drop trigger if exists bff_member_identity_guard on public.bff_members;
+create trigger bff_member_identity_guard before update on public.bff_members for each row execute function public.bff_guard_member_identity();
+
+create or replace function public.bff_read_roles(p_actor uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare tenant uuid; result jsonb;
+begin
+  select tenant_id into tenant from public.bff_members where id=p_actor and enabled;
+  if tenant is null or not public.bff_actor_can(p_actor,'System:Role:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  select coalesce(jsonb_agg(jsonb_build_object('id',r.id,'tenantId',r.tenant_id,'roleName',r.role_name,'roleCode',r.role_code,
+    'description',r.description,'enabled',r.enabled,'builtinType',r.builtin_type,'version',r.version,
+    'createTime',r.create_time,'createBy',m.display_name) order by r.create_time desc,r.id),'[]'::jsonb) into result
+    from public.bff_roles r join public.bff_members m on m.id=r.create_by where r.tenant_id=tenant;
+  return jsonb_build_object('records',result,'revision',coalesce((select version from public.bff_resource_revisions where tenant_id=tenant and resource='roles'),1));
+end $$;
+
+-- Any delegated role operation is capped by the actor's current effective buttons.
+-- A label, folder, custom role name, or builtin_type never grants base administrator status.
+create or replace function public.bff_role_within_authority(p_actor uuid,p_role uuid)
+returns boolean language sql stable security invoker set search_path='' as $$
+select exists(select 1 from public.bff_members a join public.bff_roles r on r.id=p_role and r.tenant_id=a.tenant_id
+  where a.id=p_actor and a.enabled and (a.role='admin' or not exists(
+    select 1 from public.bff_role_menus rm join public.bff_menus n on n.id=rm.menu_id
+    where rm.role_id=r.id and n.type='button' and not public.bff_actor_can(p_actor,n.name)
+  )))
+$$;
+
+create or replace function public.bff_write_role(p_actor uuid,p_operation text,p_payload jsonb,p_revision bigint)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare tenant uuid; revision bigint; definition jsonb:=p_payload->'definition'; saved public.bff_roles; target uuid;
+begin
+  if p_operation not in ('create','update','delete') then raise exception 'BFF_INVALID_OPERATION'; end if;
+  revision:=public.bff_control_lock(p_actor,'System:Role:'||case p_operation when 'create' then 'Add' when 'update' then 'Edit' else 'Delete' end,'roles');
+  if p_revision is distinct from revision then raise exception 'BFF_CONFLICT'; end if;
+  select tenant_id into tenant from public.bff_members where id=p_actor;
+  target:=nullif(coalesce(definition->>'id',p_payload->>'id'),'')::uuid;
+  if p_operation<>'create' then
+    select * into saved from public.bff_roles where id=target and tenant_id=tenant for update;
+    if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+    if saved.builtin_type is not null then raise exception 'BFF_BUILTIN_PROTECTED'; end if;
+    if not public.bff_role_within_authority(p_actor,saved.id) then raise exception 'BFF_FORBIDDEN'; end if;
+    if saved.version is distinct from (coalesce(definition->>'version',p_payload->>'version'))::integer then raise exception 'BFF_CONFLICT'; end if;
+  end if;
+  if p_operation='create' then
+    insert into public.bff_roles(tenant_id,role_code,role_name,description,enabled,create_by,update_by)
+      values(tenant,definition->>'roleCode',definition->>'roleName',coalesce(definition->>'description',''),(definition->>'enabled')::boolean,p_actor,p_actor) returning * into saved;
+  elsif p_operation='update' then
+    update public.bff_roles set role_code=definition->>'roleCode',role_name=definition->>'roleName',description=coalesce(definition->>'description',''),
+      enabled=(definition->>'enabled')::boolean,version=version+1,update_by=p_actor,update_time=now() where id=saved.id returning * into saved;
+  else
+    if exists(select 1 from public.bff_member_roles where role_id=saved.id) then raise exception 'BFF_REFERENCED'; end if;
+    delete from public.bff_role_menus where role_id=saved.id and tenant_id=tenant;
+    delete from public.bff_roles where id=saved.id;
+  end if;
+  revision:=public.bff_control_advance(p_actor,'roles','role.'||p_operation,saved.id,jsonb_build_object('roleCode',saved.role_code));
+  return jsonb_build_object('saved',true,'id',saved.id,'revision',revision);
+end $$;
+
+create or replace function public.bff_read_role_menus(p_actor uuid,p_role uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare tenant uuid; target public.bff_roles;
+begin
+  select tenant_id into tenant from public.bff_members where id=p_actor and enabled;
+  if tenant is null or not public.bff_actor_can(p_actor,'System:Role:AssignPermission') then raise exception 'BFF_FORBIDDEN'; end if;
+  select * into target from public.bff_roles where id=p_role and tenant_id=tenant;
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if not public.bff_role_within_authority(p_actor,p_role) then raise exception 'BFF_FORBIDDEN'; end if;
+  return jsonb_build_object('records',coalesce((select jsonb_agg(jsonb_build_object('menuId',menu_id) order by menu_id) from public.bff_role_menus where role_id=p_role and tenant_id=tenant),'[]'::jsonb),
+    'revision',coalesce((select version from public.bff_resource_revisions where tenant_id=tenant and resource='roles'),1),
+    'menuRevision',coalesce((select version from public.bff_resource_revisions where tenant_id=tenant and resource='menus'),1),'roleVersion',target.version);
+end $$;
+
+create or replace function public.bff_set_role_menus(p_actor uuid,p_role uuid,p_ids uuid[],p_expected uuid[],p_revision bigint,p_menu_revision bigint,p_role_version integer)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare tenant uuid; revision bigint; target public.bff_roles; current_ids uuid[];
+begin
+  revision:=public.bff_control_lock(p_actor,'System:Role:AssignPermission','roles');
+  select tenant_id into tenant from public.bff_members where id=p_actor;
+  select * into target from public.bff_roles where id=p_role and tenant_id=tenant for update;
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if target.builtin_type is not null then raise exception 'BFF_BUILTIN_PROTECTED'; end if;
+  if not public.bff_role_within_authority(p_actor,p_role) then raise exception 'BFF_FORBIDDEN'; end if;
+  select coalesce(array_agg(menu_id order by menu_id),array[]::uuid[]) into current_ids from public.bff_role_menus where role_id=p_role and tenant_id=tenant;
+  if p_revision is distinct from revision or p_role_version is distinct from target.version or p_expected is null or
+    current_ids is distinct from array(select unnest(p_expected) order by 1) or
+    p_menu_revision is distinct from coalesce((select version from public.bff_resource_revisions where tenant_id=tenant and resource='menus'),1)
+  then raise exception 'BFF_CONFLICT'; end if;
+  if p_ids is null or cardinality(p_ids)>2000 or cardinality(p_ids)<>(select count(distinct x) from unnest(p_ids) x) then raise exception 'BFF_INVALID_GRANTS'; end if;
+  if exists(select 1 from unnest(p_ids) requested where not exists(select 1 from public.bff_menus where id=requested and tenant_id=tenant)) then raise exception 'BFF_NOT_FOUND'; end if;
+  if exists(select 1 from public.bff_menus where id=any(p_ids) and type='button' and not public.bff_actor_can(p_actor,name)) then raise exception 'BFF_FORBIDDEN'; end if;
+  -- A page checkbox is presentation only. Each operation, including View, is explicit.
+  delete from public.bff_role_menus where role_id=p_role and tenant_id=tenant and not(menu_id=any(p_ids));
+  insert into public.bff_role_menus(tenant_id,role_id,menu_id,create_by) select tenant,p_role,id,p_actor from unnest(p_ids) id on conflict do nothing;
+  update public.bff_roles set version=version+1,update_by=p_actor,update_time=now() where id=p_role;
+  revision:=public.bff_control_advance(p_actor,'roles','role.permissions',p_role,jsonb_build_object('count',cardinality(p_ids)));
+  return jsonb_build_object('saved',true,'revision',revision);
+end $$;
+
+create or replace function public.bff_read_role_users(p_actor uuid,p_role uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare tenant uuid;
+begin
+  select tenant_id into tenant from public.bff_members where id=p_actor and enabled;
+  if tenant is null or not public.bff_actor_can(p_actor,'System:Role:AssignUser') then raise exception 'BFF_FORBIDDEN'; end if;
+  if not exists(select 1 from public.bff_roles where id=p_role and tenant_id=tenant) then raise exception 'BFF_NOT_FOUND'; end if;
+  if not public.bff_role_within_authority(p_actor,p_role) then raise exception 'BFF_FORBIDDEN'; end if;
+  return jsonb_build_object('records',coalesce((select jsonb_agg(jsonb_build_object('id',m.id,'nickName',m.display_name,'userName',m.email,'userEmail',m.email,
+    'avatar',null,'status',case when m.enabled then '1' else '2' end,'assigned',exists(select 1 from public.bff_member_roles where member_id=m.id and role_id=p_role)) order by m.created_at,m.id)
+    from public.bff_members m where m.tenant_id=tenant),'[]'::jsonb));
+end $$;
+
+create or replace function public.bff_set_role_users(p_actor uuid,p_role uuid,p_ids uuid[],p_expected uuid[])
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare tenant uuid; revision bigint; target public.bff_roles; current_ids uuid[]; actor_admin boolean;
+begin
+  revision:=public.bff_control_lock(p_actor,'System:Role:AssignUser','roles');
+  select tenant_id,role='admin' into tenant,actor_admin from public.bff_members where id=p_actor;
+  select * into target from public.bff_roles where id=p_role and tenant_id=tenant for update;
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if target.builtin_type is not null then raise exception 'BFF_BUILTIN_PROTECTED'; end if;
+  if not public.bff_role_within_authority(p_actor,p_role) then raise exception 'BFF_FORBIDDEN'; end if;
+  select coalesce(array_agg(member_id order by member_id),array[]::uuid[]) into current_ids from public.bff_member_roles where role_id=p_role and tenant_id=tenant;
+  if p_expected is null or current_ids is distinct from array(select unnest(p_expected) order by 1) then raise exception 'BFF_CONFLICT'; end if;
+  if p_ids is null or cardinality(p_ids)>500 or cardinality(p_ids)<>(select count(distinct x) from unnest(p_ids) x) then raise exception 'BFF_INVALID_GRANTS'; end if;
+  if exists(select 1 from unnest(p_ids) requested where not exists(select 1 from public.bff_members where id=requested and tenant_id=tenant and enabled)) then raise exception 'BFF_NOT_FOUND'; end if;
+  if not actor_admin and exists(select 1 from public.bff_members where tenant_id=tenant and role='admin' and id=any(p_ids||current_ids)) then raise exception 'BFF_FORBIDDEN'; end if;
+  delete from public.bff_member_roles where role_id=p_role and tenant_id=tenant and not(member_id=any(p_ids));
+  insert into public.bff_member_roles(tenant_id,role_id,member_id,create_by) select tenant,p_role,id,p_actor from unnest(p_ids) id on conflict do nothing;
+  update public.bff_roles set version=version+1,update_by=p_actor,update_time=now() where id=p_role;
+  revision:=public.bff_control_advance(p_actor,'roles','role.members',p_role,jsonb_build_object('count',cardinality(p_ids)));
+  return jsonb_build_object('saved',true,'revision',revision);
+end $$;
+
+create or replace function public.bff_read_members(p_actor uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare tenant uuid;
+begin
+  select tenant_id into tenant from public.bff_members where id=p_actor and enabled;
+  if tenant is null or not public.bff_actor_can(p_actor,'System:Member:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  return jsonb_build_object('revision',coalesce((select version from public.bff_resource_revisions where tenant_id=tenant and resource='members'),1),
+    'records',coalesce((select jsonb_agg(jsonb_build_object('id',m.id,'displayName',m.display_name,'email',m.email,'role',m.role,'enabled',m.enabled,'version',m.version,
+      'roleNames',coalesce((select jsonb_agg(r.role_name order by r.role_name) from public.bff_member_roles mr join public.bff_roles r on r.id=mr.role_id where mr.member_id=m.id and mr.tenant_id=tenant),'[]'::jsonb),
+      'applicationCount',(select count(*) from public.bff_application_members where member_id=m.id and tenant_id=tenant),
+      'sessionCount',(select count(*) from public.bff_sessions where member_id=m.id and expires_at>now()),'createdAt',m.created_at,'updatedAt',m.updated_at) order by m.created_at,m.id)
+      from public.bff_members m where m.tenant_id=tenant),'[]'::jsonb));
+end $$;
+
+create or replace function public.bff_write_member(p_actor uuid,p_definition jsonb,p_revision bigint)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare tenant uuid; actor_admin boolean; revision bigint; target public.bff_members; target_role text:=p_definition->>'role'; target_enabled boolean:=(p_definition->>'enabled')::boolean;
+begin
+  revision:=public.bff_control_lock(p_actor,'System:Member:Edit','members');
+  if p_revision is distinct from revision then raise exception 'BFF_CONFLICT'; end if;
+  select tenant_id,role='admin' into tenant,actor_admin from public.bff_members where id=p_actor;
+  select * into target from public.bff_members where id=(p_definition->>'id')::uuid and tenant_id=tenant for update;
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if target.version is distinct from (p_definition->>'version')::integer then raise exception 'BFF_CONFLICT'; end if;
+  if target_role is null or target_role not in ('admin','viewer') or target_enabled is null then raise exception 'BFF_INVALID_MEMBER'; end if;
+  if not actor_admin and (target.role='admin' or target_role<>target.role) then raise exception 'BFF_FORBIDDEN'; end if;
+  if target_role='admin' and target.role<>'admin' and not target.enabled then raise exception 'BFF_INVALID_MEMBER'; end if;
+  if target.id=p_actor and (not target_enabled or target_role<>target.role) then raise exception 'BFF_SELF_LOCKOUT'; end if;
+  if target.role='admin' and target.enabled and (not target_enabled or target_role<>'admin') and
+    not exists(select 1 from public.bff_members where tenant_id=tenant and enabled and role='admin' and id<>target.id)
+  then raise exception 'BFF_LAST_ADMIN'; end if;
+  update public.bff_members set role=target_role,enabled=target_enabled,version=version+1,updated_by=p_actor,updated_at=now() where id=target.id;
+  if not target_enabled then
+    delete from public.bff_sessions where member_id=target.id;
+    delete from public.bff_application_members where member_id=target.id and tenant_id=tenant;
+    delete from public.bff_member_roles where member_id=target.id and tenant_id=tenant;
+    -- Any open role assignment snapshot must observe revocation before it can save.
+    insert into public.bff_resource_revisions(tenant_id,resource) values(tenant,'roles') on conflict do nothing;
+    update public.bff_resource_revisions set version=version+1 where tenant_id=tenant and resource='roles';
+  end if;
+  revision:=public.bff_control_advance(p_actor,'members','member.update',target.id,jsonb_build_object('enabled',target_enabled,'role',target_role,'revoked',not target_enabled));
+  return public.bff_read_members(p_actor);
+end $$;
+revoke all on function public.bff_guard_member_identity(),public.bff_read_roles(uuid),public.bff_role_within_authority(uuid,uuid),public.bff_write_role(uuid,text,jsonb,bigint),
+ public.bff_read_role_menus(uuid,uuid),public.bff_set_role_menus(uuid,uuid,uuid[],uuid[],bigint,bigint,integer),public.bff_read_role_users(uuid,uuid),public.bff_set_role_users(uuid,uuid,uuid[],uuid[]),
+ public.bff_read_members(uuid),public.bff_write_member(uuid,jsonb,bigint) from public,anon,authenticated;
+grant execute on function public.bff_guard_member_identity(),public.bff_read_roles(uuid),public.bff_role_within_authority(uuid,uuid),public.bff_write_role(uuid,text,jsonb,bigint),
+ public.bff_read_role_menus(uuid,uuid),public.bff_set_role_menus(uuid,uuid,uuid[],uuid[],bigint,bigint,integer),public.bff_read_role_users(uuid,uuid),public.bff_set_role_users(uuid,uuid,uuid[],uuid[]),
+ public.bff_read_members(uuid),public.bff_write_member(uuid,jsonb,bigint) to service_role;
+
 create or replace function public.bff_navigation(p_actor uuid)
 returns jsonb language sql stable security invoker set search_path='' as $$
 with recursive actor as (
@@ -598,16 +809,23 @@ returns jsonb language plpgsql stable security invoker set search_path='' as $$
 declare tenant uuid; result jsonb;
 begin
   select tenant_id into tenant from public.bff_members where id=p_actor and enabled;
-  if tenant is null or p_resource not in ('menu','dict_type','dictionary') or not public.bff_actor_can(p_actor,
-    case when p_resource='menu' then 'System:Menu:Delete' else 'DataCenter:Dict:Delete' end)
+  if tenant is null or p_resource not in ('role','menu','dict_type','dictionary') or not public.bff_actor_can(p_actor,
+    case when p_resource='role' then 'System:Role:Delete' when p_resource='menu' then 'System:Menu:Delete' else 'DataCenter:Dict:Delete' end)
   then raise exception 'BFF_FORBIDDEN'; end if;
   if coalesce(cardinality(p_ids),0) not between 1 and 500 then raise exception 'BFF_INVALID_DELETE'; end if;
   if exists(select 1 from unnest(p_ids) requested where not exists(
     select 1 from public.bff_menus where p_resource='menu' and id=requested and tenant_id=tenant
     union all select 1 from public.bff_dictionary_types where p_resource='dict_type' and id=requested and tenant_id=tenant
     union all select 1 from public.bff_dictionary_items where p_resource='dictionary' and id=requested and tenant_id=tenant
+    union all select 1 from public.bff_roles where p_resource='role' and id=requested and tenant_id=tenant
   )) then raise exception 'BFF_NOT_FOUND'; end if;
   with dependencies as (
+    select r.id as resource_id,'sys_role'::text as source_table,r.id,r.role_name as label,'系统预置角色，需保留'::text as summary,r.update_time as created_at
+      from public.bff_roles r where p_resource='role' and r.tenant_id=tenant and r.id=any(p_ids) and r.builtin_type is not null
+    union all select mr.role_id,'sys_user',m.id,m.display_name,'已分配的 BFF 成员',mr.create_time
+      from public.bff_member_roles mr join public.bff_members m on m.id=mr.member_id and m.tenant_id=mr.tenant_id
+      where p_resource='role' and mr.tenant_id=tenant and mr.role_id=any(p_ids)
+    union all
     select n.id as resource_id,'sys_menu'::text as source_table,n.id,n.meta->>'title' as label,'系统预置入口，需保留'::text as summary,n.update_time as created_at
       from public.bff_menus n where p_resource='menu' and n.tenant_id=tenant and n.id=any(p_ids) and n.builtin
     union all select n.parent_id,'sys_menu',n.id,n.meta->>'title','下级菜单',n.update_time from public.bff_menus n
@@ -630,6 +848,7 @@ begin
       where p_resource='dictionary' and d.tenant_id=tenant and d.cascade_parent_id=any(p_ids) and not(d.id=any(p_ids))
   ) select coalesce(jsonb_agg(jsonb_build_object('resourceId',resource_id,'sourceTable',source_table,'dependencyCode',case
     when p_resource='menu' and source_table='sys_role' then 'menu_role_grant'
+    when p_resource='role' then 'role_user_assignment'
     when p_resource='dict_type' and source_table='sys_dictionary' then 'dict_type_item'
     when p_resource='dict_type' then 'dict_type_child'
     when p_resource='dictionary' then 'dictionary_child'
@@ -648,10 +867,11 @@ begin
   for actor in select distinct on (tenant_id) id,tenant_id from public.bff_members where enabled and role='admin' order by tenant_id,created_at,id loop
     perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||actor.tenant_id::text,0));
     -- Shared reference navigation resolves these canonical pro route names.
-    update public.bff_menus set name=case component when '/shared/system/menu' then 'Menu' else 'Dict' end,
+    update public.bff_menus set name=case component when '/shared/system/menu' then 'Menu' when '/bff/system/member/index' then 'User' else 'Dict' end,
       version=version+1,update_by=actor.id,update_time=now()
       where tenant_id=actor.tenant_id and builtin and
-        ((component='/shared/system/menu' and name<>'Menu') or (component='/shared/data-center/dict' and name<>'Dict'));
+        ((component='/shared/system/menu' and name<>'Menu') or (component='/shared/data-center/dict' and name<>'Dict') or
+         (component='/bff/system/member/index' and name<>'User'));
     get diagnostics normalized=row_count;
     if normalized>0 then
       insert into public.bff_resource_revisions(tenant_id,resource) values(actor.tenant_id,'menus') on conflict do nothing;
@@ -661,6 +881,8 @@ begin
       ('BffApplications',null::text,'/applications','/bff/applications/index','应用管理','ri:apps-2-line','menu',1),
       ('BffSystem',null,'/system','/index/index','系统管理','ri:settings-3-line','folder',90),
       ('Menu','BffSystem','/system/menu','/shared/system/menu','菜单管理','ri:menu-2-line','menu',1),
+      ('Role','BffSystem','/system/role','/shared/system/role','角色与权限','ri:shield-user-line','menu',2),
+      ('User','BffSystem','/system/member','/bff/system/member/index','成员管理','ri:team-line','menu',3),
       ('BffDataCenter',null,'/data-center','/index/index','数据中心','ri:database-2-line','folder',91),
       ('Dict','BffDataCenter','/data-center/dict','/shared/data-center/dict','字典管理','ri:book-2-line','menu',1)
     ) as installed(name,parent_name,path,component,title,icon,type,sort) loop
@@ -670,11 +892,13 @@ begin
         values(actor.tenant_id,parent,entry.name,entry.path,entry.component,entry.type,entry.sort,jsonb_build_object('title',entry.title,'icon',entry.icon,'isEnable',true,'keepAlive',true),true,actor.id,actor.id)
         on conflict (tenant_id,name) do nothing;
     end loop;
-    for entry in select * from (values('BffApplications','BffApplication'),('Menu','System:Menu'),('Dict','DataCenter:Dict')) as pages(name,mark) loop
+    for entry in select * from (values('BffApplications','BffApplication'),('Menu','System:Menu'),('Role','System:Role'),('User','System:Member'),('Dict','DataCenter:Dict')) as pages(name,mark) loop
       select id into page from public.bff_menus where tenant_id=actor.tenant_id and name=entry.name;
-      foreach action in array case when entry.mark='BffApplication' then array['View','Add','Edit','Grant'] else array['View','Add','Edit','Delete'] end loop
+      foreach action in array case when entry.mark='BffApplication' then array['View','Add','Edit','Grant']
+        when entry.mark='System:Role' then array['View','Add','Edit','Delete','AssignPermission','AssignUser']
+        when entry.mark='System:Member' then array['View','Edit'] else array['View','Add','Edit','Delete'] end loop
         insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
-          values(actor.tenant_id,page,entry.mark||':'||action,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then '新增' when 'Edit' then '编辑' when 'Grant' then '访问授权' else '删除' end,'isEnable',true),true,actor.id,actor.id)
+          values(actor.tenant_id,page,entry.mark||':'||action,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then '新增' when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' else '删除' end,'isEnable',true),true,actor.id,actor.id)
           on conflict (tenant_id,name) do nothing;
       end loop;
     end loop;
@@ -711,40 +935,116 @@ begin
   end loop;
 end $$;
 set constraints all immediate;
+-- Application reads re-evaluate the current member and role grants in the same
+-- database statement that selects data. A cached HTTP session is not authority.
+create or replace function public.bff_read_applications(p_actor uuid,p_page integer,p_size integer,p_keyword text)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; can_manage boolean; result jsonb;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_page not between 1 and 100000 or p_size not between 1 and 100 or length(coalesce(p_keyword,''))>100 then
+    raise exception 'BFF_INVALID_PAGE';
+  end if;
+  can_manage:=actor.role='admin' or public.bff_actor_can(p_actor,'BffApplication:Edit')
+    or public.bff_actor_can(p_actor,'BffApplication:Grant');
+  with visible as materialized (
+    select a.* from public.bff_applications a where a.tenant_id=actor.tenant_id
+      and (actor.role='admin' or
+        (exists(select 1 from public.bff_application_members am
+          where am.application_id=a.id and am.member_id=p_actor) and (a.enabled or can_manage)))
+      and (coalesce(p_keyword,'')='' or pg_catalog.strpos(pg_catalog.lower(a.name),pg_catalog.lower(p_keyword))>0)
+  ), page as (
+    select * from visible order by created_at desc,id desc limit p_size offset (p_page::bigint-1)*p_size
+  )
+  select jsonb_build_object(
+    'records',coalesce((select jsonb_agg(jsonb_build_object('id',id,'code',code,'name',name,
+      'description',description,'homeUrl',home_url,'enabled',enabled,'version',version,
+      'createdAt',created_at,'updatedAt',updated_at) order by created_at desc,id desc) from page),'[]'::jsonb),
+    'total',(select count(*) from visible),'current',p_page,'size',p_size
+  ) into result;
+  return result;
+end $$;
+create or replace function public.bff_read_application_members(p_actor uuid,p_application uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; app public.bff_applications; result jsonb;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  select * into app from public.bff_applications where id=p_application and tenant_id=actor.tenant_id;
+  if app.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if actor.role<>'admin' and (not public.bff_actor_can(p_actor,'BffApplication:Grant') or
+    not exists(select 1 from public.bff_application_members
+      where application_id=app.id and member_id=p_actor)) then raise exception 'BFF_FORBIDDEN'; end if;
+  select coalesce(jsonb_agg(jsonb_build_object('id',m.id,'name',m.display_name,'email',m.email,
+    'role',m.role,'enabled',m.enabled,'granted',am.member_id is not null) order by m.created_at,m.id),'[]'::jsonb)
+    into result from public.bff_members m left join public.bff_application_members am
+      on am.member_id=m.id and am.application_id=app.id where m.tenant_id=actor.tenant_id;
+  return result;
+end $$;
 create or replace function public.bff_save_application(p_actor uuid,p_id uuid,p_version integer,p_code text,p_name text,p_description text,p_home_url text,p_enabled boolean)
 returns public.bff_applications language plpgsql security invoker set search_path='' as $$
-declare actor public.bff_members; saved public.bff_applications;
+declare actor public.bff_members; existing public.bff_applications; saved public.bff_applications;
 begin
-  select * into actor from public.bff_members where id=p_actor and enabled and role='admin';
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  -- Role/member mutations take this same tenant lock before changing grants.
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||actor.tenant_id::text,0));
+  select * into actor from public.bff_members where id=p_actor and tenant_id=actor.tenant_id and enabled for share;
   if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
   if p_id is null then
+    if actor.role<>'admin' and not public.bff_actor_can(p_actor,'BffApplication:Add') then raise exception 'BFF_FORBIDDEN'; end if;
     insert into public.bff_applications(tenant_id,code,name,description,home_url,enabled,created_by,updated_by)
     values(actor.tenant_id,p_code,p_name,p_description,p_home_url,p_enabled,p_actor,p_actor) returning * into saved;
+    insert into public.bff_application_members(application_id,member_id,created_by,tenant_id)
+      values(saved.id,p_actor,p_actor,actor.tenant_id);
   else
-    update public.bff_applications set name=p_name,description=p_description,home_url=p_home_url,enabled=p_enabled,version=version+1,updated_by=p_actor,updated_at=now()
-    where id=p_id and tenant_id=actor.tenant_id and version=p_version and code=p_code returning * into saved;
+    select * into existing from public.bff_applications where id=p_id and tenant_id=actor.tenant_id for update;
+    if existing.id is null then raise exception 'BFF_CONFLICT'; end if;
+    if actor.role<>'admin' and (not public.bff_actor_can(p_actor,'BffApplication:Edit') or
+      not exists(select 1 from public.bff_application_members
+        where application_id=existing.id and member_id=p_actor)) then raise exception 'BFF_FORBIDDEN'; end if;
+    update public.bff_applications set name=p_name,description=p_description,home_url=p_home_url,enabled=p_enabled,
+      version=version+1,updated_by=p_actor,updated_at=now()
+      where id=p_id and tenant_id=actor.tenant_id and version=p_version and code=p_code returning * into saved;
     if saved.id is null then raise exception 'BFF_CONFLICT'; end if;
   end if;
-  insert into public.bff_audit_events(tenant_id,actor_id,action,application_id) values(actor.tenant_id,p_actor,case when p_id is null then 'application.create' else 'application.update' end,saved.id);
+  insert into public.bff_audit_events(tenant_id,actor_id,action,application_id)
+    values(actor.tenant_id,p_actor,case when p_id is null then 'application.create' else 'application.update' end,saved.id);
   return saved;
 end $$;
 create or replace function public.bff_set_application_member(p_actor uuid,p_application uuid,p_member uuid,p_granted boolean)
 returns void language plpgsql security invoker set search_path='' as $$
-declare actor public.bff_members;
+declare actor public.bff_members; app public.bff_applications; target public.bff_members;
 begin
-  select * into actor from public.bff_members where id=p_actor and enabled and role='admin';
-  if actor.id is null or not exists(select 1 from public.bff_applications where id=p_application and tenant_id=actor.tenant_id)
-    or not exists(select 1 from public.bff_members where id=p_member and tenant_id=actor.tenant_id and enabled)
-  then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_granted is null then raise exception 'BFF_INVALID_GRANT'; end if;
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||actor.tenant_id::text,0));
+  select * into actor from public.bff_members where id=p_actor and tenant_id=actor.tenant_id and enabled for share;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  select * into app from public.bff_applications where id=p_application and tenant_id=actor.tenant_id for update;
+  if app.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  if actor.role<>'admin' and (not public.bff_actor_can(p_actor,'BffApplication:Grant') or
+    not exists(select 1 from public.bff_application_members
+      where application_id=app.id and member_id=p_actor)) then raise exception 'BFF_FORBIDDEN'; end if;
+  select * into target from public.bff_members where id=p_member and tenant_id=actor.tenant_id;
+  if target.id is null or (p_granted and not target.enabled) then raise exception 'BFF_FORBIDDEN'; end if;
   if p_granted then
-    insert into public.bff_application_members(application_id,member_id,created_by) values(p_application,p_member,p_actor) on conflict do nothing;
+    insert into public.bff_application_members(application_id,member_id,created_by,tenant_id)
+      values(p_application,p_member,p_actor,actor.tenant_id) on conflict do nothing;
   else
     delete from public.bff_application_members where application_id=p_application and member_id=p_member;
   end if;
-  insert into public.bff_audit_events(tenant_id,actor_id,action,application_id) values(actor.tenant_id,p_actor,case when p_granted then 'application.grant' else 'application.revoke' end,p_application);
+  insert into public.bff_audit_events(tenant_id,actor_id,action,application_id)
+    values(actor.tenant_id,p_actor,case when p_granted then 'application.grant' else 'application.revoke' end,p_application);
 end $$;
-revoke all on function public.bff_save_application(uuid,uuid,integer,text,text,text,text,boolean),public.bff_set_application_member(uuid,uuid,uuid,boolean) from public,anon,authenticated;
-grant execute on function public.bff_save_application(uuid,uuid,integer,text,text,text,text,boolean),public.bff_set_application_member(uuid,uuid,uuid,boolean) to service_role;
+revoke all on function public.bff_read_applications(uuid,integer,integer,text),
+  public.bff_read_application_members(uuid,uuid),public.bff_save_application(uuid,uuid,integer,text,text,text,text,boolean),
+  public.bff_set_application_member(uuid,uuid,uuid,boolean) from public,anon,authenticated;
+grant execute on function public.bff_read_applications(uuid,integer,integer,text),
+  public.bff_read_application_members(uuid,uuid),public.bff_save_application(uuid,uuid,integer,text,text,text,text,boolean),
+  public.bff_set_application_member(uuid,uuid,uuid,boolean) to service_role;
 alter table public.bff_members enable row level security;
 alter table public.bff_applications enable row level security;
 alter table public.bff_application_members enable row level security;

@@ -12,7 +12,9 @@ export function controlFailure(error: { code?: string; message?: string } | null
     BFF_CONFLICT: [409, '记录或层级已被修改，请重新打开后再操作'],
     BFF_NOT_FOUND: [404, '记录不存在，或已不在当前工作空间'],
     BFF_BUILTIN_PROTECTED: [409, '系统预置的访问入口和权限标识需要保留'],
-    BFF_REFERENCED: [409, '记录仍被引用，请处理关联记录后重试']
+    BFF_REFERENCED: [409, '记录仍被引用，请处理关联记录后重试'],
+    BFF_SELF_LOCKOUT: [409, '不能停用自己或降低自己的管理员身份'],
+    BFF_LAST_ADMIN: [409, '工作空间至少需要保留一名启用的管理员']
   }
   const known =
     error.message && Object.hasOwn(failures, error.message) ? failures[error.message] : undefined
@@ -27,7 +29,7 @@ export function controlFailure(error: { code?: string; message?: string } | null
   throw new Error('基础管理操作失败', { cause: error })
 }
 
-function text(value: unknown, label: string, max: number, required = false): string {
+export function text(value: unknown, label: string, max: number, required = false): string {
   if (value === undefined || value === null) {
     if (required) throw new HttpError(400, `请填写${label}`)
     return ''
@@ -67,6 +69,8 @@ const menuComponents = new Set([
   '/index/index',
   '/bff/applications/index',
   '/shared/system/menu',
+  '/shared/system/role',
+  '/bff/system/member/index',
   '/shared/data-center/dict'
 ])
 export function menuInput(value: unknown): Record<string, unknown> {
@@ -255,10 +259,13 @@ export async function controlReferences(req: IncomingMessage, session: Session):
   const input = await body(req, 65536)
   const resource =
     input.resourceType ??
-    { sys_menu: 'menu', sys_dict_type: 'dict_type', sys_dictionary: 'dictionary' }[
-      String(input.table)
-    ]
-  if (!['menu', 'dict_type', 'dictionary'].includes(String(resource)))
+    {
+      sys_role: 'role',
+      sys_menu: 'menu',
+      sys_dict_type: 'dict_type',
+      sys_dictionary: 'dictionary'
+    }[String(input.table)]
+  if (!['role', 'menu', 'dict_type', 'dictionary'].includes(String(resource)))
     throw new HttpError(400, '该资源尚未接入关联检查')
   const result = await database.rpc('bff_control_references', {
     p_actor: session.member.id,
@@ -278,6 +285,7 @@ export async function uniqueControlField(
   const value = text(input.value, '校验值', 1000, true)
   const excludeId = nullableId(input.excludeId)
   const scopes: Record<string, { table: string; fields: string[]; permission: string }> = {
+    sys_role: { table: 'bff_roles', fields: ['role_code'], permission: 'System:Role:View' },
     sys_menu: { table: 'bff_menus', fields: ['name', 'path'], permission: 'System:Menu:View' },
     sys_dict_type: {
       table: 'bff_dictionary_types',
@@ -347,6 +355,8 @@ export async function dictionaryDisplay(session: Session, url: URL): Promise<unk
 export async function tableColumnRuntime(session: Session, url: URL): Promise<unknown> {
   const routes: Record<string, string> = {
     '/system/menu': 'System:Menu:View',
+    '/system/role': 'System:Role:View',
+    '/system/member': 'System:Member:View',
     '/data-center/dict': 'DataCenter:Dict:View',
     '/applications': 'BffApplication:View'
   }

@@ -16,8 +16,11 @@ const tenantA = randomUUID(),
   tenantB = randomUUID(),
   adminA = randomUUID(),
   adminB = randomUUID(),
-  viewer = randomUUID()
-const members = [adminA, adminB, viewer],
+  viewer = randomUUID(),
+  operator = randomUUID(),
+  secondViewer = randomUUID(),
+  secondAdmin = randomUUID()
+const members = [adminA, adminB, viewer, operator, secondViewer, secondAdmin],
   csrf = 'synthetic-integration-csrf'
 const tokens = members.map(() => opaqueToken())
 function applicationList(value: unknown): ApplicationList {
@@ -81,6 +84,393 @@ async function api(
   })
   return { status: response.status, body: await response.json() }
 }
+function object(value: unknown): Record<string, unknown> {
+  assert.ok(isObjectRecord(value))
+  return value
+}
+function objectRows(value: unknown): Record<string, unknown>[] {
+  const rows = object(value).records
+  assert.ok(Array.isArray(rows) && rows.every(isObjectRecord))
+  return rows
+}
+async function verifyRoleAndMemberHttp(applicationId: string): Promise<void> {
+  const rolePage = randomUUID(),
+    memberPage = randomUUID(),
+    roleView = randomUUID(),
+    roleEdit = randomUUID(),
+    assignPermission = randomUUID(),
+    assignUser = randomUUID(),
+    memberEdit = randomUUID()
+  requireData(
+    await database
+      .from('bff_menus')
+      .insert([
+        ...[
+          [rolePage, 'HttpRolePage', '/fixture-role', '/shared/system/role'],
+          [memberPage, 'HttpMemberPage', '/fixture-member', '/bff/system/member/index']
+        ].map(([id, name, path, component]) => ({
+          id,
+          tenant_id: tenantA,
+          name,
+          type: 'menu',
+          path,
+          component,
+          meta: { title: name },
+          create_by: adminA,
+          update_by: adminA
+        })),
+        ...[
+          [roleView, rolePage, 'System:Role:View'],
+          [roleEdit, rolePage, 'System:Role:Edit'],
+          [assignPermission, rolePage, 'System:Role:AssignPermission'],
+          [assignUser, rolePage, 'System:Role:AssignUser'],
+          [memberEdit, memberPage, 'System:Member:Edit']
+        ].map(([id, parent_id, name]) => ({
+          id,
+          tenant_id: tenantA,
+          parent_id,
+          name,
+          type: 'button',
+          path: '',
+          component: '',
+          meta: { title: name },
+          create_by: adminA,
+          update_by: adminA
+        }))
+      ])
+      .select('id')
+  )
+  const roleCreate = async (revision: number, roleCode: string) => {
+    const response = await api(0, '/api/control/roles', 'POST', {
+      operation: 'create',
+      revision,
+      definition: { roleCode, roleName: roleCode, description: '', enabled: true }
+    })
+    assert.equal(response.status, 200)
+    const id = object(response.body).id
+    assert.ok(typeof id === 'string')
+    return id
+  }
+  assert.equal(
+    (
+      await api(
+        0,
+        '/api/control/roles',
+        'POST',
+        {
+          operation: 'create',
+          revision: 1,
+          definition: { roleCode: 'Forged', roleName: 'Forged', enabled: true }
+        },
+        { Origin: 'https://forged.example' }
+      )
+    ).status,
+    403
+  )
+  const reader = await roleCreate(1, 'HttpReader')
+  const operatorRole = await roleCreate(2, 'HttpOperator')
+  const roles = await api(0, '/api/control/roles', 'GET', undefined, {
+    'x-art-tenant-scope': tenantB
+  })
+  assert.equal(roles.status, 200)
+  assert.equal(objectRows(roles.body).length, 2)
+  assert.equal(
+    (
+      await api(0, '/api/control/roles', 'POST', {
+        operation: 'update',
+        revision: 2,
+        definition: {
+          id: operatorRole,
+          version: 1,
+          roleCode: 'HttpOperator',
+          roleName: 'Stale',
+          enabled: true
+        }
+      })
+    ).status,
+    409
+  )
+  assert.equal(
+    (
+      await api(0, '/api/control/roles', 'POST', {
+        operation: 'update',
+        revision: 3,
+        definition: {
+          id: operatorRole,
+          version: 1,
+          roleCode: 'HttpOperator',
+          roleName: 'Operator',
+          enabled: true
+        }
+      })
+    ).status,
+    200
+  )
+  const operatorMenus = object((await api(0, `/api/control/roles/${operatorRole}/menus`)).body)
+  assert.equal(
+    (
+      await api(0, `/api/control/roles/${operatorRole}/menus`, 'POST', {
+        ids: [rolePage, roleView, roleEdit, assignPermission, assignUser],
+        expectedIds: [],
+        revision: operatorMenus.revision,
+        menuRevision: operatorMenus.menuRevision,
+        roleVersion: operatorMenus.roleVersion
+      })
+    ).status,
+    200
+  )
+  assert.equal(
+    (
+      await api(0, `/api/control/roles/${operatorRole}/users`, 'POST', {
+        ids: [operator],
+        expectedIds: []
+      })
+    ).status,
+    200
+  )
+  assert.equal((await api(3, '/api/control/roles')).status, 200)
+  assert.equal((await api(3, '/api/control/menus?catalog=1')).status, 200)
+  const readerMenus = object((await api(0, `/api/control/roles/${reader}/menus`)).body)
+  assert.equal(
+    (
+      await api(0, `/api/control/roles/${reader}/menus`, 'POST', {
+        ids: [rolePage, roleView],
+        expectedIds: [],
+        revision: readerMenus.revision,
+        menuRevision: readerMenus.menuRevision,
+        roleVersion: readerMenus.roleVersion
+      })
+    ).status,
+    200
+  )
+  const freshReaderMenus = object((await api(0, `/api/control/roles/${reader}/menus`)).body)
+  assert.equal(
+    (
+      await api(3, `/api/control/roles/${reader}/menus`, 'POST', {
+        ids: [rolePage, roleView, memberEdit],
+        expectedIds: [rolePage, roleView],
+        revision: freshReaderMenus.revision,
+        menuRevision: freshReaderMenus.menuRevision,
+        roleVersion: freshReaderMenus.roleVersion
+      })
+    ).status,
+    403
+  )
+  assert.equal(
+    (
+      await api(0, `/api/control/roles/${reader}/menus`, 'POST', {
+        ids: [rolePage, roleView],
+        expectedIds: [],
+        revision: readerMenus.revision,
+        menuRevision: readerMenus.menuRevision,
+        roleVersion: readerMenus.roleVersion
+      })
+    ).status,
+    409
+  )
+  assert.equal(
+    (
+      await api(0, `/api/control/roles/${reader}/users`, 'POST', {
+        ids: [operator, secondViewer],
+        expectedIds: []
+      })
+    ).status,
+    200
+  )
+  const roleUsers = objectRows((await api(0, `/api/control/roles/${reader}/users`)).body)
+  assert.equal(roleUsers.filter((row) => row.assigned === true).length, 2)
+  const roleRefs = await api(0, '/api/control/references', 'POST', {
+    resourceType: 'role',
+    ids: [reader]
+  })
+  assert.equal(roleRefs.status, 200)
+  assert.ok(Array.isArray(roleRefs.body) && roleRefs.body.length === 2)
+  const currentRole = async (id: string) => {
+    const list = object((await api(0, '/api/control/roles')).body)
+    const row = objectRows(list).find((entry) => entry.id === id)
+    assert.ok(row)
+    return { revision: list.revision, version: row.version }
+  }
+  assert.equal(
+    (
+      await api(0, '/api/control/roles', 'POST', {
+        operation: 'delete',
+        id: reader,
+        ...(await currentRole(reader))
+      })
+    ).status,
+    409
+  )
+  assert.equal(
+    (
+      await api(0, `/api/applications/${applicationId}/members/${secondViewer}`, 'PUT', {
+        granted: true
+      })
+    ).status,
+    200
+  )
+  assert.equal(applicationList((await api(4, '/api/applications')).body).total, 1)
+  const memberSnapshot = async (id: string) => {
+    const list = object((await api(0, '/api/control/members')).body)
+    const row = objectRows(list).find((entry) => entry.id === id)
+    assert.ok(row)
+    return { revision: list.revision, version: row.version }
+  }
+  assert.equal(
+    (
+      await api(0, '/api/control/members', 'POST', {
+        operation: 'update',
+        ...{ revision: (await memberSnapshot(adminA)).revision },
+        definition: { id: adminA, version: 1, enabled: false, role: 'admin' }
+      })
+    ).status,
+    409
+  )
+  const disableSnapshot = await memberSnapshot(secondViewer)
+  assert.equal(
+    (
+      await api(0, '/api/control/members', 'POST', {
+        operation: 'update',
+        revision: disableSnapshot.revision,
+        definition: {
+          id: secondViewer,
+          version: disableSnapshot.version,
+          enabled: false,
+          role: 'viewer'
+        }
+      })
+    ).status,
+    200
+  )
+  assert.equal((await api(4, '/api/auth/session')).status, 401)
+  for (const table of ['bff_sessions', 'bff_application_members', 'bff_member_roles']) {
+    const rows = requireData(
+      await database.from(table).select('member_id').eq('member_id', secondViewer)
+    )
+    assert.equal(rows.length, 0)
+  }
+  const enableSnapshot = await memberSnapshot(secondViewer)
+  assert.equal(
+    (
+      await api(0, '/api/control/members', 'POST', {
+        operation: 'update',
+        revision: enableSnapshot.revision,
+        definition: {
+          id: secondViewer,
+          version: disableSnapshot.version,
+          enabled: true,
+          role: 'viewer'
+        }
+      })
+    ).status,
+    409
+  )
+  assert.equal(
+    (
+      await api(0, '/api/control/members', 'POST', {
+        operation: 'update',
+        revision: enableSnapshot.revision,
+        definition: {
+          id: secondViewer,
+          version: enableSnapshot.version,
+          enabled: true,
+          role: 'viewer'
+        }
+      })
+    ).status,
+    200
+  )
+  assert.equal(
+    requireData(
+      await database
+        .from('bff_application_members')
+        .select('member_id')
+        .eq('member_id', secondViewer)
+    ).length,
+    0
+  )
+  assert.equal(
+    requireData(
+      await database.from('bff_member_roles').select('member_id').eq('member_id', secondViewer)
+    ).length,
+    0
+  )
+  assert.equal(
+    (
+      await api(0, `/api/control/roles/${reader}/users`, 'POST', {
+        ids: [],
+        expectedIds: [operator]
+      })
+    ).status,
+    200
+  )
+  assert.equal(
+    (
+      await api(0, '/api/control/roles', 'POST', {
+        operation: 'delete',
+        id: reader,
+        ...(await currentRole(reader))
+      })
+    ).status,
+    200
+  )
+  assert.equal(
+    (
+      await api(0, `/api/control/roles/${operatorRole}/users`, 'POST', {
+        ids: [],
+        expectedIds: [operator]
+      })
+    ).status,
+    200
+  )
+  assert.equal(
+    (
+      await api(0, '/api/control/roles', 'POST', {
+        operation: 'delete',
+        id: operatorRole,
+        ...(await currentRole(operatorRole))
+      })
+    ).status,
+    200
+  )
+  const otherAdmin = await memberSnapshot(secondAdmin)
+  assert.equal(
+    (
+      await api(0, '/api/control/members', 'POST', {
+        operation: 'update',
+        revision: otherAdmin.revision,
+        definition: { id: secondAdmin, version: otherAdmin.version, enabled: false, role: 'admin' }
+      })
+    ).status,
+    200
+  )
+  const activeAdmins = requireData(
+    await database
+      .from('bff_members')
+      .select('id')
+      .eq('tenant_id', tenantA)
+      .eq('role', 'admin')
+      .eq('enabled', true)
+  )
+  assert.deepEqual(
+    activeAdmins.map((row) => row.id),
+    [adminA]
+  )
+  const lastAdmin = await memberSnapshot(adminA)
+  assert.equal(
+    (
+      await api(0, '/api/control/members', 'POST', {
+        operation: 'update',
+        revision: lastAdmin.revision,
+        definition: { id: adminA, version: lastAdmin.version, enabled: false, role: 'admin' }
+      })
+    ).status,
+    409
+  )
+  console.log(
+    'Role/member HTTP checks passed: two roles, CAS, grant ceiling, assignments, disable and re-enable.'
+  )
+}
 let verificationError: unknown
 const cleanupErrors: Error[] = []
 try {
@@ -93,7 +483,7 @@ try {
           issuer: config.issuer,
           subject: id,
           tenant_id: index === 1 ? tenantB : tenantA,
-          role: index === 2 ? 'viewer' : 'admin',
+          role: [0, 1, 5].includes(index) ? 'admin' : 'viewer',
           display_name: '隔离集成验证'
         }))
       )
@@ -408,6 +798,7 @@ try {
   console.log(
     'Shared menu/dictionary HTTP checks passed: two records, atomic conflicting edits, dynamic navigation, scoped uniqueness, disabled history, references and deletion.'
   )
+  await verifyRoleAndMemberHttp(app.id)
   requireData(
     await database.from('bff_members').update({ enabled: false }).eq('id', viewer).select('id')
   )
@@ -422,6 +813,28 @@ try {
 } catch (error) {
   verificationError = error
 } finally {
+  for (const table of ['bff_member_roles', 'bff_role_menus', 'bff_roles']) {
+    const result = await database.from(table).delete().in('tenant_id', [tenantA, tenantB])
+    if (result.error)
+      cleanupErrors.push(
+        new Error(`Synthetic access cleanup failed for ${table}`, { cause: result.error })
+      )
+  }
+  const buttons = await database
+    .from('bff_menus')
+    .delete()
+    .in('create_by', members)
+    .eq('type', 'button')
+  if (buttons.error)
+    cleanupErrors.push(new Error('Synthetic button cleanup failed', { cause: buttons.error }))
+  const memberActors = await database
+    .from('bff_members')
+    .update({ updated_by: null })
+    .in('id', members)
+  if (memberActors.error)
+    cleanupErrors.push(
+      new Error('Synthetic member actor cleanup failed', { cause: memberActors.error })
+    )
   for (const table of [
     'bff_sessions',
     'bff_application_members',
