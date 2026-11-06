@@ -3,7 +3,7 @@
     <BusinessWorkspaceHeader
       eyebrow="INTERFACE ORCHESTRATION"
       title="接口编排"
-      description="将接口输入映射到有序上游调用，仅公开明确映射的输出。当前维护草稿与测试，发布在下一阶段。"
+      description="声明输入参数，串联上游步骤，验证并测试已映射的响应字段。"
       icon="ri:flow-chart"
       :metrics="metrics"
       :tags="[
@@ -24,6 +24,13 @@
       v-else-if="options && !options.applications.some((application) => application.enabled)"
       title="尚无可用于接口编排的启用应用。请先在应用管理中登记并启用应用。"
       type="info"
+      :closable="false"
+      show-icon
+    />
+    <ElAlert
+      v-else-if="options && !options.networkPolicyConfigured"
+      title="上游网络策略待配置。可先设计与验证草稿，策略就绪后再进行真实测试。"
+      type="warning"
       :closable="false"
       show-icon
     />
@@ -226,6 +233,7 @@
     {
       type: 'add',
       label: '新增接口草稿',
+      buttonProps: { type: 'primary', plain: false },
       permission: 'BffInterface:Add',
       disabled: optionsLoading.value || !options.value?.applications.some((item) => item.enabled),
       onClick: openCreate
@@ -412,7 +420,7 @@
       },
       {
         prop: 'path',
-        label: '对外请求',
+        label: '请求定义',
         minWidth: 225,
         formatter: (row) => (
           <div class="flex min-w-0 items-center gap-2">
