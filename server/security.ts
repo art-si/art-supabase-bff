@@ -92,6 +92,9 @@ export function resolveAuthorizationLoginRedirect(
   })
   if (forceLogin) query.set('sso_force', '1')
   if (reason === 'access_denied') query.set('sso_error', reason)
+  // Hash routes do not change the HTML cache key. Use a public cache key so a
+  // cached pre-SSO login bundle cannot discard this application's request.
+  target.searchParams.set('_auth_ui', Date.now().toString(36))
   target.hash = `#/auth/login?${query}`
   return target.href
 }

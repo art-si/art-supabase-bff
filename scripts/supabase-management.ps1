@@ -68,7 +68,7 @@ function Invoke-BffQuery([string]$Query) {
   Invoke-RestMethod -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json' -Body (@{query=$Query} | ConvertTo-Json -Compress)
 }
 if ($Action -eq 'InspectMembers') {
-  Invoke-BffQuery "select m.email,m.display_name,m.role,m.enabled,count(am.application_id)::integer as application_grants from public.bff_members m left join public.bff_application_members am on am.member_id=m.id group by m.id order by m.created_at,m.email" | ConvertTo-Json -Depth 5
+  Invoke-BffQuery "select m.email,m.display_name,m.role,m.enabled,count(am.application_id)::integer as application_grants,(select count(*)::integer from public.bff_sessions s where s.member_id=m.id and s.expires_at>now()) as active_sessions from public.bff_members m left join public.bff_application_members am on am.member_id=m.id group by m.id order by m.created_at,m.email" | ConvertTo-Json -Depth 5
   exit
 }
 if ($Action -eq 'VerifyBff') {

@@ -61,6 +61,7 @@ test('first-party entry opens only the configured login form and retains the opa
   )
   assert.equal(login.origin, 'https://identity.example')
   assert.equal(login.pathname, '/pro/')
+  assert.match(login.searchParams.get('_auth_ui') || '', /^[a-z0-9]+$/)
   assert.equal(login.hash.split('?')[0], '#/auth/login')
   const query = new URLSearchParams(login.hash.split('?')[1])
   assert.equal(query.get('sso_authorization_id'), 'test_request')
