@@ -61,7 +61,7 @@
                 :span="12"
                 :gutter="12"
                 label-position="top"
-                class="p-3"
+                root-class="p-0!"
               />
             </ArtSectionCard>
           </div>
@@ -115,13 +115,14 @@
                   >
                 </div>
               </template>
-              <div class="grid min-w-0 gap-4 p-3">
+              <div class="grid min-w-0 gap-4">
                 <ArtForm
                   v-model="form.definition.steps[index]"
                   :items="stepItems(index)"
                   :span="12"
                   :gutter="12"
                   label-position="top"
+                  root-class="p-0!"
                 />
                 <p class="text-xs text-g-700">
                   当前草稿绑定配置 v{{
@@ -365,7 +366,7 @@
       type: 'input',
       span: 12,
       props: { maxlength: 500, placeholder: '/orders/{orderId}' },
-      description: '只登记路径模板；本阶段不发布公网入口。'
+      description: '路径模板用于标识接口，草稿不提供对外访问入口。'
     },
     {
       key: 'description',

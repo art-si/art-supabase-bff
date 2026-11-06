@@ -25,7 +25,7 @@
         :span="12"
         :gutter="12"
         label-position="top"
-        class="p-3"
+        root-class="p-0!"
         @update:model-value="(value) => updateBinding(index, value)"
       />
     </ArtSectionCard>
