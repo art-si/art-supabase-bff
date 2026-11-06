@@ -46,6 +46,7 @@ export const config = {
   upstreamAllowedOrigins: env.BFF_UPSTREAM_ALLOWED_ORIGINS || '',
   upstreamAllowedCidrs: env.BFF_UPSTREAM_ALLOWED_CIDRS || '',
   upstreamAllowLocalHttp: env.BFF_UPSTREAM_ALLOW_LOCAL_HTTP === 'true',
+  interfaceTestWriteOrigins: env.BFF_INTERFACE_TEST_WRITE_ORIGINS || '',
   production
 }
 

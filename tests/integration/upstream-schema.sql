@@ -5,7 +5,7 @@ declare
   admin_a uuid:=gen_random_uuid(); admin_b uuid:=gen_random_uuid(); viewer_a uuid:=gen_random_uuid();
   app_a public.bff_applications; app_disabled public.bff_applications; app_foreign public.bff_applications;
   service_a uuid:=gen_random_uuid(); service_b uuid:=gen_random_uuid(); service_c uuid:=gen_random_uuid(); service_foreign uuid:=gen_random_uuid();
-  page_id uuid:=gen_random_uuid(); role_id uuid:=gen_random_uuid(); result jsonb; before_count integer;
+  page_id uuid:=gen_random_uuid(); role_id uuid:=gen_random_uuid(); result jsonb; before_count integer; header text;
 begin
   if exists(select 1 from pg_class c where c.oid in ('public.bff_upstream_services'::regclass,
     'public.bff_upstream_credentials'::regclass,'public.bff_upstream_service_revisions'::regclass)
@@ -106,6 +106,16 @@ begin
         'baseUrl','http://localhost.evil.example','authType','none','timeoutMs',1000),null);
     raise exception 'Lookalike localhost HTTP was persisted';
   exception when check_violation then null; end;
+  for header in select name from (values ('Accept'),('Accept-Encoding'),('Content-Type'),('Origin'),
+    ('Referer'),('User-Agent'),('Expect'),('Proxy-Connection')) as blocked(name) loop
+    begin
+      perform public.bff_write_upstream(admin_a,'create',gen_random_uuid(),null,
+        jsonb_build_object('applicationId',app_a.id,'code','invalid-header-'||lower(replace(header,'-','')),
+          'name','Unsafe header','environment','development','baseUrl','https://api.example.test',
+          'authType','api_key_header','headerName',header,'timeoutMs',1000),null);
+      raise exception 'Protected transport header was persisted';
+    exception when check_violation then null; end;
+  end loop;
   select count(*) into before_count from public.bff_audit_events where tenant_id=tenant_a and action='upstream.update';
   begin
     perform public.bff_write_upstream(admin_a,'update',service_a,99,

@@ -71,7 +71,7 @@
   const saveError = ref('')
   const canChangeCredentialPolicy = computed(() => hasAuth('BffUpstream:RotateSecret'))
   const reservedHeader =
-    /^(authorization|cookie|set-cookie|host|content-length|connection|proxy-authorization|proxy-authenticate|transfer-encoding|te|trailer|upgrade|forwarded|x-forwarded-.*)$/i
+    /^(accept|accept-encoding|content-type|origin|referer|user-agent|expect|authorization|cookie|set-cookie|host|content-length|connection|proxy-.*|transfer-encoding|te|trailer|upgrade|forwarded|x-forwarded-.*)$/i
   const form = ref<UpstreamForm>({
     applicationId: '',
     code: '',

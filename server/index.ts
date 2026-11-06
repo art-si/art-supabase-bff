@@ -32,6 +32,15 @@ import {
   testUpstream,
   upstreamReferences
 } from './upstreams'
+import {
+  listInterfaces,
+  interfaceOptions,
+  saveInterface,
+  deleteInterface,
+  validateInterface,
+  testInterface,
+  interfaceReferences
+} from './interfaces'
 import TreeUtils from 'art-supabase-pro/src/utils/tree.ts'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 
@@ -48,7 +57,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       json(res, {
         status: 'ok',
         authenticationConfigured: authReady(),
-        capabilities: ['upstreams']
+        capabilities: ['upstreams', 'interfaces']
       })
       return
     }
@@ -99,6 +108,46 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     if (url.pathname === '/api/control/menus' && req.method === 'GET') {
       json(res, await readMenus(session, url.searchParams.get('catalog') === '1'))
       return
+    }
+    if (url.pathname === '/api/interfaces/options' && req.method === 'GET') {
+      json(res, await interfaceOptions(session))
+      return
+    }
+    if (url.pathname === '/api/interfaces') {
+      if (req.method === 'GET') {
+        json(res, await listInterfaces(session, url))
+        return
+      }
+      if (req.method === 'POST') {
+        json(res, await saveInterface(req, session), 201)
+        return
+      }
+    }
+    const interfaceResource = /^\/api\/interfaces\/([^/]+)(?:\/(validate|tests|references))?$/.exec(
+      url.pathname
+    )
+    if (interfaceResource) {
+      const [, id, operation] = interfaceResource
+      if (!operation && req.method === 'PUT') {
+        json(res, await saveInterface(req, session, id))
+        return
+      }
+      if (!operation && req.method === 'DELETE') {
+        json(res, await deleteInterface(req, session, id))
+        return
+      }
+      if (operation === 'validate' && req.method === 'POST') {
+        json(res, await validateInterface(req, session, id))
+        return
+      }
+      if (operation === 'tests' && req.method === 'POST') {
+        json(res, await testInterface(req, session, id))
+        return
+      }
+      if (operation === 'references' && req.method === 'GET') {
+        json(res, await interfaceReferences(session, id))
+        return
+      }
     }
     if (url.pathname === '/api/upstreams/options' && req.method === 'GET') {
       json(res, await upstreamOptions(session))

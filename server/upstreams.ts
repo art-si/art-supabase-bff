@@ -13,13 +13,14 @@ import { type Session, requireMutation } from './auth'
 import { body, HttpError } from './http'
 import { uuid } from './applications'
 import { controlFailure, revisionInput, text } from './control-plane'
+import { encryptCredential, type EncryptedCredential } from './upstream-credentials'
+import { isSafeCredentialHeader, normalizeUpstreamUrl, probeUpstream } from './upstream-network'
 import {
-  decryptCredential,
-  encryptCredential,
-  type EncryptedCredential
-} from './upstream-credentials'
-import { normalizeUpstreamUrl, probeUpstream } from './upstream-network'
-import { credentialsReady, upstreamKeys, upstreamPolicy } from './upstream-runtime'
+  credentialsReady,
+  loadUpstreamCredential,
+  upstreamKeys,
+  upstreamPolicy
+} from './upstream-runtime'
 
 const healthMessages: Record<string, string> = {
   reachable: '服务可连接；本次测试未验证业务凭据',
@@ -185,13 +186,7 @@ export function upstreamInput(
       : authType === 'none'
         ? ''
         : text(value.headerName, '凭据请求头', 64, true)
-  if (
-    authType === 'api_key_header' &&
-    (!/^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(headerName) ||
-      /^(authorization|cookie|set-cookie|host|content-length|connection|proxy-authorization|proxy-authenticate|transfer-encoding|te|trailer|upgrade|forwarded|x-forwarded-.*)$/i.test(
-        headerName
-      ))
-  )
+  if (authType === 'api_key_header' && !isSafeCredentialHeader(headerName))
     throw new HttpError(
       400,
       '请使用独立的 API Key 请求头，不得覆盖认证、Cookie、路由或连接控制字段'
@@ -245,43 +240,14 @@ async function target(session: Session, id: string, permission: string): Promise
   return upstreamDto(result.data)
 }
 async function requireUsableCredential(session: Session, record: UpstreamService): Promise<void> {
-  if (record.authType === 'none') return
-  const result = await database
-    .from('bff_upstream_credentials')
-    .select('ciphertext,key_id,credential_version')
-    .eq('service_id', record.id)
-    .eq('tenant_id', session.member.tenant_id)
-    .eq('application_id', record.applicationId)
-    .eq('credential_version', record.credentialVersion)
-    .maybeSingle()
-  failure(result.error)
-  const value: unknown = result.data
-  if (!isObjectRecord(value)) throw new HttpError(409, '请先配置服务凭据，再启用服务')
-  try {
-    if (
-      typeof value.ciphertext !== 'string' ||
-      typeof value.key_id !== 'string' ||
-      typeof value.credential_version !== 'number'
-    )
-      throw new Error('Invalid credential record')
-    // Decrypt only inside the server boundary; no plaintext leaves this check.
-    decryptCredential(
-      {
-        ciphertext: value.ciphertext,
-        keyId: value.key_id,
-        version: value.credential_version
-      },
-      {
-        tenantId: session.member.tenant_id,
-        applicationId: record.applicationId,
-        serviceId: record.id,
-        version: record.credentialVersion
-      },
-      upstreamKeys
-    )
-  } catch {
-    throw new HttpError(503, '服务凭据暂不可用，请管理员恢复对应密钥版本或重新配置凭据')
-  }
+  await loadUpstreamCredential({
+    tenantId: session.member.tenant_id,
+    applicationId: record.applicationId,
+    serviceId: record.id,
+    version: record.credentialVersion,
+    authType: record.authType,
+    headerName: record.headerName
+  })
 }
 export async function listUpstreams(session: Session, url: URL): Promise<UpstreamList> {
   const current = Number(url.searchParams.get('current') || 1),

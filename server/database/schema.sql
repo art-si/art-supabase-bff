@@ -98,8 +98,9 @@ create table if not exists public.bff_upstream_services (
     (auth_type='none' and header_name='') or (auth_type='bearer' and header_name='Authorization') or
     (auth_type='api_key_header' and header_name ~ '^[A-Za-z][A-Za-z0-9-]{0,63}$' and
       lower(header_name) not in ('authorization','cookie','set-cookie','host','content-length','connection',
-        'proxy-authorization','proxy-authenticate','transfer-encoding','te','trailer','upgrade','forwarded') and
-      lower(header_name) not like 'x-forwarded-%')),
+        'proxy-authorization','proxy-authenticate','transfer-encoding','te','trailer','upgrade','forwarded',
+        'accept','accept-encoding','content-type','origin','referer','user-agent','expect') and
+      lower(header_name) not like 'x-forwarded-%' and lower(header_name) not like 'proxy-%')),
   timeout_ms integer not null default 5000 check (timeout_ms between 100 and 30000),
   version integer not null default 1 check (version>0),
   config_version integer not null default 1 check (config_version>0),
@@ -121,6 +122,14 @@ create table if not exists public.bff_upstream_services (
   foreign key (created_by,tenant_id) references public.bff_members(id,tenant_id),
   foreign key (updated_by,tenant_id) references public.bff_members(id,tenant_id)
 );
+alter table public.bff_upstream_services drop constraint if exists bff_upstream_services_header_name_check;
+alter table public.bff_upstream_services add constraint bff_upstream_services_header_name_check check (
+  (auth_type='none' and header_name='') or (auth_type='bearer' and header_name='Authorization') or
+  (auth_type='api_key_header' and header_name ~ '^[A-Za-z][A-Za-z0-9-]{0,63}$' and
+    lower(header_name) not in ('authorization','cookie','set-cookie','host','content-length','connection',
+      'proxy-authorization','proxy-authenticate','transfer-encoding','te','trailer','upgrade','forwarded',
+      'accept','accept-encoding','content-type','origin','referer','user-agent','expect') and
+    lower(header_name) not like 'x-forwarded-%' and lower(header_name) not like 'proxy-%'));
 create index if not exists bff_upstreams_scope_idx on public.bff_upstream_services(tenant_id,application_id,environment,status,created_at desc,id) where deleted_at is null;
 create index if not exists bff_upstreams_creator_idx on public.bff_upstream_services(created_by);
 create index if not exists bff_upstreams_updater_idx on public.bff_upstream_services(updated_by);
@@ -160,15 +169,74 @@ create table if not exists public.bff_upstream_service_revisions (
 );
 create index if not exists bff_upstream_revisions_scope_idx on public.bff_upstream_service_revisions(tenant_id,application_id,service_id,config_version desc);
 create index if not exists bff_upstream_revisions_creator_idx on public.bff_upstream_service_revisions(created_by);
+create unique index if not exists bff_upstream_service_environment_uidx on public.bff_upstream_services(id,tenant_id,application_id,environment);
+create unique index if not exists bff_upstream_revision_environment_uidx on public.bff_upstream_service_revisions(service_id,config_version,tenant_id,application_id,environment);
+create table if not exists public.bff_interfaces (
+  id uuid primary key,
+  tenant_id uuid not null,
+  application_id uuid not null,
+  environment text not null check (environment in ('development','staging','production')),
+  code text not null check (code ~ '^[a-z][a-z0-9-]{1,63}$'),
+  name text not null check (length(trim(name)) between 1 and 100),
+  description text not null default '' check (length(description)<=1000),
+  method text not null check (method in ('GET','POST','PUT','PATCH','DELETE')),
+  path text not null check (length(path) between 1 and 500 and left(path,1)='/' and left(path,2)<>'//' and path !~ '[[:cntrl:]?#\\]'),
+  definition jsonb not null check (case when jsonb_typeof(definition)='object' and
+    jsonb_typeof(definition->'inputs')='array' and jsonb_typeof(definition->'steps')='array' and
+    jsonb_typeof(definition->'outputs')='array' then
+      jsonb_array_length(definition->'inputs')<=32 and jsonb_array_length(definition->'steps') between 1 and 8 and
+      jsonb_array_length(definition->'outputs') between 1 and 32 else false end),
+  version integer not null default 1 check (version>0),
+  validation_status text not null default 'unvalidated' check (validation_status in ('unvalidated','valid','invalid')),
+  validated_version integer check (validated_version>0),
+  validation_issues jsonb not null default '[]'::jsonb check (jsonb_typeof(validation_issues)='array'),
+  last_validated_at timestamptz,
+  last_test_status text not null default 'not_tested' check (last_test_status in ('not_tested','passed','failed','stale')),
+  last_test_version integer check (last_test_version>0),
+  last_test_at timestamptz,
+  deleted_at timestamptz,
+  created_by uuid not null,
+  updated_by uuid not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(id,tenant_id,application_id,environment),
+  foreign key (application_id,tenant_id) references public.bff_applications(id,tenant_id),
+  foreign key (created_by,tenant_id) references public.bff_members(id,tenant_id),
+  foreign key (updated_by,tenant_id) references public.bff_members(id,tenant_id)
+);
+create unique index if not exists bff_interface_code_uidx on public.bff_interfaces(tenant_id,application_id,environment,code) where deleted_at is null;
+create unique index if not exists bff_interface_route_uidx on public.bff_interfaces(tenant_id,application_id,environment,method,path) where deleted_at is null;
+create index if not exists bff_interface_scope_idx on public.bff_interfaces(tenant_id,application_id,environment,created_at desc,id) where deleted_at is null;
+create index if not exists bff_interface_creator_idx on public.bff_interfaces(created_by);
+create index if not exists bff_interface_updater_idx on public.bff_interfaces(updated_by);
+create table if not exists public.bff_interface_upstreams (
+  interface_id uuid not null,
+  step_key text not null check (step_key ~ '^[A-Za-z][A-Za-z0-9_-]{0,63}$'),
+  service_id uuid not null,
+  config_version integer not null check (config_version>0),
+  tenant_id uuid not null,
+  application_id uuid not null,
+  environment text not null,
+  created_by uuid not null,
+  created_at timestamptz not null default now(),
+  primary key(interface_id,step_key),
+  foreign key (interface_id,tenant_id,application_id,environment) references public.bff_interfaces(id,tenant_id,application_id,environment),
+  foreign key (service_id,tenant_id,application_id,environment) references public.bff_upstream_services(id,tenant_id,application_id,environment),
+  foreign key (service_id,config_version,tenant_id,application_id,environment)
+    references public.bff_upstream_service_revisions(service_id,config_version,tenant_id,application_id,environment),
+  foreign key (created_by,tenant_id) references public.bff_members(id,tenant_id)
+);
+create index if not exists bff_interface_upstream_service_idx on public.bff_interface_upstreams(tenant_id,application_id,service_id,interface_id);
+create index if not exists bff_interface_upstream_creator_idx on public.bff_interface_upstreams(created_by);
 create table if not exists public.bff_resource_revisions (
   tenant_id uuid not null,
-  resource text not null check (resource in ('menus','dictionaries','roles','members','upstreams')),
+  resource text not null check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces')),
   version bigint not null default 1 check (version > 0),
   primary key (tenant_id,resource)
 );
 alter table public.bff_resource_revisions drop constraint if exists bff_resource_revisions_resource_check;
 alter table public.bff_resource_revisions add constraint bff_resource_revisions_resource_check
-  check (resource in ('menus','dictionaries','roles','members','upstreams'));
+  check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces'));
 create table if not exists public.bff_menus (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null,
@@ -499,6 +567,26 @@ revoke all on function public.bff_guard_upstream_scope(),public.bff_guard_upstre
   public.bff_guard_upstream_active_credential() from public,anon,authenticated;
 grant execute on function public.bff_guard_upstream_scope(),public.bff_guard_upstream_credential(),public.bff_guard_upstream_revision(),
   public.bff_guard_upstream_active_credential() to service_role;
+create or replace function public.bff_guard_interface_scope()
+returns trigger language plpgsql security invoker set search_path='' as $$
+begin
+  if TG_OP='UPDATE' then
+    if NEW.id is distinct from OLD.id or NEW.tenant_id is distinct from OLD.tenant_id or
+      NEW.application_id is distinct from OLD.application_id or NEW.environment is distinct from OLD.environment or
+      NEW.code is distinct from OLD.code or NEW.created_by is distinct from OLD.created_by or
+      NEW.created_at is distinct from OLD.created_at
+    then raise exception using errcode='23514',message='BFF_INTERFACE_IDENTITY_IMMUTABLE'; end if;
+  end if;
+  if not exists(select 1 from public.bff_members where id=NEW.created_by and tenant_id=NEW.tenant_id) or
+    not exists(select 1 from public.bff_members where id=NEW.updated_by and tenant_id=NEW.tenant_id)
+  then raise exception using errcode='23514',message='BFF_INTERFACE_ACTOR_SCOPE_INVALID'; end if;
+  return NEW;
+end $$;
+drop trigger if exists bff_interface_scope_guard on public.bff_interfaces;
+create trigger bff_interface_scope_guard before insert or update on public.bff_interfaces
+for each row execute function public.bff_guard_interface_scope();
+revoke all on function public.bff_guard_interface_scope() from public,anon,authenticated;
+grant execute on function public.bff_guard_interface_scope() to service_role;
 
 create or replace function public.bff_actor_can(p_actor uuid,p_permission text)
 returns boolean language sql stable security invoker set search_path='' as $$
@@ -1039,6 +1127,7 @@ begin
       ('User','BffSystem','/system/member','/bff/system/member/index','成员管理','ri:team-line','menu',3),
       ('BffServiceManagement',null,'/services','/index/index','服务管理','ri:server-line','folder',60),
       ('BffUpstreams','BffServiceManagement','/upstreams','/bff/upstreams/index','上游服务','ri:links-line','menu',1),
+      ('BffInterfaces','BffServiceManagement','/interfaces','/bff/interfaces/index','接口编排','ri:flow-chart','menu',2),
       ('BffDataCenter',null,'/data-center','/index/index','数据中心','ri:database-2-line','folder',91),
       ('Dict','BffDataCenter','/data-center/dict','/shared/data-center/dict','字典管理','ri:book-2-line','menu',1)
     ) as installed(name,parent_name,path,component,title,icon,type,sort) loop
@@ -1046,19 +1135,20 @@ begin
       if entry.parent_name is not null then select id into parent from public.bff_menus where tenant_id=actor.tenant_id and name=entry.parent_name; end if;
       insert into public.bff_menus(tenant_id,parent_id,name,path,component,type,sort,meta,builtin,create_by,update_by)
         values(actor.tenant_id,parent,entry.name,entry.path,entry.component,entry.type,entry.sort,jsonb_build_object('title',entry.title,'icon',entry.icon,
-          'isEnable',true,'keepAlive',true),true,actor.id,actor.id)
+          'isEnable',entry.name<>'BffInterfaces','keepAlive',true),true,actor.id,actor.id)
         on conflict (tenant_id,name) do nothing;
     end loop;
     for entry in select * from (values('BffApplications','BffApplication'),('Menu','System:Menu'),('Role','System:Role'),('User','System:Member'),
-      ('BffUpstreams','BffUpstream'),('Dict','DataCenter:Dict')) as pages(name,mark) loop
+      ('BffUpstreams','BffUpstream'),('BffInterfaces','BffInterface'),('Dict','DataCenter:Dict')) as pages(name,mark) loop
       select id into page from public.bff_menus where tenant_id=actor.tenant_id and name=entry.name;
       foreach action in array case when entry.mark='BffApplication' then array['View','Add','Edit','Grant']
         when entry.mark='BffUpstream' then array['View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete']
+        when entry.mark='BffInterface' then array['View','Add','Edit','Validate','Test','TestWrite','Delete']
         when entry.mark='System:Role' then array['View','Add','Edit','Delete','AssignPermission','AssignUser']
         when entry.mark='System:Member' then array['View','Edit'] else array['View','Add','Edit','Delete'] end loop
         insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
-          values(actor.tenant_id,page,entry.mark||':'||action,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then '新增' when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Test' then '连通性检测' when 'RotateSecret' then '更换凭据' else '删除' end,
-            'isEnable',true),true,actor.id,actor.id)
+          values(actor.tenant_id,page,entry.mark||':'||action,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then '新增' when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
+            'isEnable',entry.mark<>'BffInterface'),true,actor.id,actor.id)
           on conflict (tenant_id,name) do nothing;
       end loop;
     end loop;
@@ -1314,15 +1404,23 @@ select public.bff_upstream_target(p_actor,p_id,'BffUpstream:Test')
 $$;
 create or replace function public.bff_upstream_references(p_actor uuid,p_id uuid)
 returns jsonb language plpgsql stable security invoker set search_path='' as $$
-declare target jsonb;
+declare target jsonb; result jsonb:='[]'::jsonb; bound jsonb;
 begin
   target:=public.bff_upstream_target(p_actor,p_id,'BffUpstream:Delete');
   if target->>'status'='active' then
-    return jsonb_build_array(jsonb_build_object('resourceId',p_id,'sourceTable','bff_upstream_services',
+    result:=jsonb_build_array(jsonb_build_object('resourceId',p_id,'sourceTable','bff_upstream_services',
       'dependencyCode','upstream_active','recordId',p_id,'targetId',p_id,'recordNo',target->>'code',
       'recordSummary','先停用服务后再删除','createdAt',target->>'createdAt','cleanupAllowed',false));
   end if;
-  return '[]'::jsonb;
+  select coalesce(jsonb_agg(jsonb_build_object('resourceId',p_id,'sourceTable','bff_interfaces',
+    'dependencyCode','upstream_interface_binding','recordId',i.id,'targetId',i.id,'recordNo',i.code,
+    'recordSummary','接口草稿仍在引用上游服务','createdAt',i.created_at,'cleanupAllowed',false)
+    order by i.created_at,i.id),'[]'::jsonb) into bound
+    from public.bff_interfaces i
+    where i.application_id=(target->>'applicationId')::uuid and i.deleted_at is null and exists(
+      select 1 from public.bff_interface_upstreams b where b.interface_id=i.id and b.tenant_id=i.tenant_id and
+        b.application_id=i.application_id and b.service_id=p_id);
+  return result||bound;
 end $$;
 create or replace function public.bff_write_upstream(p_actor uuid,p_operation text,p_id uuid,p_version integer,
   p_definition jsonb,p_credential jsonb default null)
@@ -1443,6 +1541,10 @@ begin
       end if;
     else
       if saved.status='active' then raise exception 'BFF_UPSTREAM_ACTIVE'; end if;
+      if exists(select 1 from public.bff_interface_upstreams b join public.bff_interfaces i
+        on i.id=b.interface_id and i.tenant_id=b.tenant_id and i.application_id=b.application_id
+        where b.service_id=saved.id and b.tenant_id=saved.tenant_id and i.deleted_at is null)
+      then raise exception 'BFF_REFERENCED'; end if;
       select exists(select 1 from public.bff_upstream_credentials where service_id=saved.id) into had_credential;
       delete from public.bff_upstream_credentials where service_id=saved.id;
       update public.bff_upstream_services set deleted_at=now(),version=version+1,
@@ -1502,6 +1604,290 @@ grant execute on function public.bff_upstream_scope(uuid,uuid,text),public.bff_r
   public.bff_upstream_probe_target(uuid,uuid),public.bff_upstream_references(uuid,uuid),
   public.bff_write_upstream(uuid,text,uuid,integer,jsonb,jsonb),public.bff_record_upstream_probe(uuid,uuid,integer,jsonb)
   to service_role;
+create or replace function public.bff_interface_scope(p_actor uuid,p_application uuid,p_permission text)
+returns boolean language sql stable security invoker set search_path='' as $$
+select exists(select 1 from public.bff_members m join public.bff_applications a
+  on a.id=p_application and a.tenant_id=m.tenant_id
+  where m.id=p_actor and m.enabled and public.bff_actor_can(p_actor,p_permission) and
+    (m.role='admin' or exists(select 1 from public.bff_application_members am
+      where am.application_id=a.id and am.member_id=m.id and am.tenant_id=m.tenant_id)))
+$$;
+create or replace function public.bff_interface_public(p_id uuid)
+returns jsonb language sql stable security invoker set search_path='' as $$
+select jsonb_build_object('id',i.id,'applicationId',i.application_id,
+  'application',jsonb_build_object('id',a.id,'code',a.code,'name',a.name,'enabled',a.enabled),
+  'environment',i.environment,'code',i.code,'name',i.name,'description',i.description,
+  'method',i.method,'path',i.path,'definition',i.definition,'version',i.version,
+  'validationStatus',i.validation_status,'validatedVersion',i.validated_version,
+  'validationIssues',i.validation_issues,'lastValidatedAt',i.last_validated_at,
+  'lastTestStatus',i.last_test_status,'lastTestVersion',i.last_test_version,'lastTestAt',i.last_test_at,
+  'createdAt',i.created_at,'updatedAt',i.updated_at)
+from public.bff_interfaces i join public.bff_applications a on a.id=i.application_id and a.tenant_id=i.tenant_id
+where i.id=p_id
+$$;
+create or replace function public.bff_read_interfaces(p_actor uuid,p_filters jsonb default '{}'::jsonb)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; app_id uuid; record_id uuid; env text; validation text; keyword text;
+  page_no integer; page_size integer; result jsonb;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffInterface:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  if jsonb_typeof(p_filters) is distinct from 'object' then raise exception 'BFF_INVALID_FILTER'; end if;
+  app_id:=nullif(p_filters->>'applicationId','')::uuid;
+  record_id:=nullif(p_filters->>'recordId','')::uuid;
+  env:=nullif(p_filters->>'environment','');
+  validation:=nullif(p_filters->>'validationStatus','');
+  keyword:=pg_catalog.btrim(coalesce(p_filters->>'name',''));
+  page_no:=coalesce((p_filters->>'current')::integer,1);
+  page_size:=coalesce((p_filters->>'size')::integer,20);
+  if page_no not between 1 and 100000 or page_size not between 1 and 100 or length(keyword)>100 or
+    (env is not null and env not in ('development','staging','production')) or
+    (validation is not null and validation not in ('unvalidated','valid','invalid'))
+  then raise exception 'BFF_INVALID_FILTER'; end if;
+  with scoped as materialized (
+    select i.*,a.code as application_code,a.name as application_name,a.enabled as application_enabled
+    from public.bff_interfaces i join public.bff_applications a
+      on a.id=i.application_id and a.tenant_id=i.tenant_id
+    where i.tenant_id=actor.tenant_id and i.deleted_at is null and (app_id is null or i.application_id=app_id)
+      and (record_id is null or i.id=record_id) and (env is null or i.environment=env)
+      and (keyword='' or pg_catalog.strpos(pg_catalog.lower(i.name),pg_catalog.lower(keyword))>0 or
+        pg_catalog.strpos(pg_catalog.lower(i.code),pg_catalog.lower(keyword))>0)
+      and (actor.role='admin' or exists(select 1 from public.bff_application_members am
+        where am.application_id=i.application_id and am.member_id=p_actor and am.tenant_id=actor.tenant_id))
+  ), filtered as materialized (select * from scoped where validation is null or validation_status=validation),
+  page_rows as (select * from filtered order by created_at desc,id desc limit page_size offset (page_no::bigint-1)*page_size)
+  select jsonb_build_object(
+    'records',coalesce((select jsonb_agg(jsonb_build_object('id',id,'applicationId',application_id,
+      'application',jsonb_build_object('id',application_id,'code',application_code,'name',application_name,'enabled',application_enabled),
+      'environment',environment,'code',code,'name',name,'description',description,'method',method,'path',path,
+      'definition',definition,'version',version,'validationStatus',validation_status,'validatedVersion',validated_version,
+      'validationIssues',validation_issues,'lastValidatedAt',last_validated_at,'lastTestStatus',last_test_status,
+      'lastTestVersion',last_test_version,'lastTestAt',last_test_at,'createdAt',created_at,'updatedAt',updated_at)
+      order by created_at desc,id desc) from page_rows),'[]'::jsonb),
+    'total',(select count(*) from filtered),'current',page_no,'size',page_size,
+    'summary',jsonb_build_object('total',(select count(*) from scoped),
+      'valid',(select count(*) from scoped where validation_status='valid' and validated_version=version),
+      'unvalidated',(select count(*) from scoped where validation_status='unvalidated' or validated_version is distinct from version),
+      'tested',(select count(*) from scoped where last_test_status in ('passed','failed') and last_test_version=version))) into result;
+  return result;
+end $$;
+create or replace function public.bff_interface_options(p_actor uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffInterface:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  return jsonb_build_object(
+    'applications',coalesce((select jsonb_agg(jsonb_build_object('id',a.id,'code',a.code,'name',a.name,'enabled',a.enabled)
+      order by a.name,a.id) from public.bff_applications a where a.tenant_id=actor.tenant_id and
+      (actor.role='admin' or exists(select 1 from public.bff_application_members am
+        where am.application_id=a.id and am.member_id=p_actor and am.tenant_id=actor.tenant_id))),'[]'::jsonb),
+    'environments',coalesce((select jsonb_agg(jsonb_build_object('value',d.value,'label',d.label) order by d.sort,d.id)
+      from public.bff_dictionary_types t join public.bff_dictionary_items d on d.type_id=t.id and d.tenant_id=t.tenant_id
+      where t.tenant_id=actor.tenant_id and t.code='bffRuntimeEnvironment' and t.builtin and t.status='1' and
+        d.builtin and d.status='1'),'[]'::jsonb),
+    'upstreams',coalesce((select jsonb_agg(jsonb_build_object('id',u.id,'applicationId',u.application_id,
+      'environment',u.environment,'code',u.code,'name',u.name,'status',u.status,'configVersion',u.config_version,
+      'authType',u.auth_type,'credentialConfigured',exists(select 1 from public.bff_upstream_credentials c where c.service_id=u.id))
+      order by u.name,u.id) from public.bff_upstream_services u where u.tenant_id=actor.tenant_id and u.deleted_at is null and
+      (actor.role='admin' or exists(select 1 from public.bff_application_members am
+        where am.application_id=u.application_id and am.member_id=p_actor and am.tenant_id=actor.tenant_id))),'[]'::jsonb));
+end $$;
+create or replace function public.bff_interface_target(p_actor uuid,p_id uuid,p_permission text default 'BffInterface:View')
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; target public.bff_interfaces;
+begin
+  if p_permission is null or p_permission not in ('BffInterface:View','BffInterface:Edit','BffInterface:Validate',
+    'BffInterface:Test','BffInterface:TestWrite','BffInterface:Delete') then raise exception 'BFF_INVALID_PERMISSION'; end if;
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  select * into target from public.bff_interfaces where id=p_id and tenant_id=actor.tenant_id and deleted_at is null;
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if not public.bff_interface_scope(p_actor,target.application_id,p_permission) then raise exception 'BFF_FORBIDDEN'; end if;
+  return public.bff_interface_public(target.id);
+end $$;
+create or replace function public.bff_interface_references(p_actor uuid,p_id uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+begin
+  perform public.bff_interface_target(p_actor,p_id,'BffInterface:Delete');
+  -- Published versions are introduced in the following phase. Extend this
+  -- reference check in the same transaction as that schema is added.
+  return '[]'::jsonb;
+end $$;
+create or replace function public.bff_write_interface(p_actor uuid,p_operation text,p_id uuid,p_version integer,p_definition jsonb)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_interfaces; requested_app uuid; permission text; revision bigint;
+  details jsonb; step jsonb; step_key text; bound_service_id uuid; config_number integer;
+begin
+  if p_operation is null or p_operation not in ('create','update','delete') or p_id is null then raise exception 'BFF_INVALID_OPERATION'; end if;
+  permission:=case p_operation when 'create' then 'BffInterface:Add' when 'update' then 'BffInterface:Edit' else 'BffInterface:Delete' end;
+  revision:=public.bff_control_lock(p_actor,permission,'interfaces');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  set constraints all deferred;
+  if p_operation='create' then
+    if p_version is not null or jsonb_typeof(p_definition) is distinct from 'object' then raise exception 'BFF_INVALID_CREATE'; end if;
+    requested_app:=nullif(p_definition->>'applicationId','')::uuid;
+    if requested_app is null or not public.bff_interface_scope(p_actor,requested_app,permission) then raise exception 'BFF_FORBIDDEN'; end if;
+  else
+    select * into saved from public.bff_interfaces where id=p_id and tenant_id=actor.tenant_id and deleted_at is null for update;
+    if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+    if not public.bff_interface_scope(p_actor,saved.application_id,permission) then raise exception 'BFF_FORBIDDEN'; end if;
+    if p_version is distinct from saved.version then raise exception 'BFF_CONFLICT'; end if;
+  end if;
+  if p_operation in ('create','update') then
+    if jsonb_typeof(p_definition) is distinct from 'object' or jsonb_typeof(p_definition->'definition') is distinct from 'object'
+      then raise exception 'BFF_INVALID_DEFINITION'; end if;
+    details:=p_definition->'definition';
+    if jsonb_typeof(details->'inputs') is distinct from 'array' or
+      jsonb_typeof(details->'steps') is distinct from 'array' or
+      jsonb_typeof(details->'outputs') is distinct from 'array'
+      then raise exception 'BFF_INVALID_DEFINITION'; end if;
+    if jsonb_array_length(details->'inputs')>32 or jsonb_array_length(details->'steps') not between 1 and 8 or
+      jsonb_array_length(details->'outputs') not between 1 and 32 or
+      exists(select 1 from jsonb_array_elements(details->'steps') as entry(value) where
+        jsonb_typeof(entry.value) is distinct from 'object' or entry.value->>'key' !~ '^[A-Za-z][A-Za-z0-9_-]{0,63}$') or
+      exists(select 1 from jsonb_array_elements(details->'steps') as entry(value)
+        group by entry.value->>'key' having count(*)>1)
+      then raise exception 'BFF_INVALID_DEFINITION'; end if;
+    if p_operation='create' then
+      insert into public.bff_interfaces(id,tenant_id,application_id,environment,code,name,description,method,path,definition,created_by,updated_by)
+        values(p_id,actor.tenant_id,requested_app,p_definition->>'environment',p_definition->>'code',p_definition->>'name',
+          coalesce(p_definition->>'description',''),p_definition->>'method',p_definition->>'path',details,p_actor,p_actor)
+        returning * into saved;
+    else
+      if (p_definition ? 'applicationId' and (p_definition->>'applicationId')::uuid is distinct from saved.application_id) or
+        (p_definition ? 'environment' and p_definition->>'environment' is distinct from saved.environment) or
+        (p_definition ? 'code' and p_definition->>'code' is distinct from saved.code)
+      then raise exception 'BFF_INTERFACE_IDENTITY_IMMUTABLE'; end if;
+      update public.bff_interfaces set name=p_definition->>'name',description=coalesce(p_definition->>'description',''),
+        method=p_definition->>'method',path=p_definition->>'path',definition=details,version=version+1,
+        validation_status='unvalidated',validated_version=null,validation_issues='[]'::jsonb,last_validated_at=null,
+        last_test_status=case when last_test_status in ('passed','failed') then 'stale' else 'not_tested' end,
+        updated_by=p_actor,updated_at=now() where id=saved.id returning * into saved;
+      delete from public.bff_interface_upstreams where interface_id=saved.id;
+    end if;
+    for step in select value from jsonb_array_elements(details->'steps') loop
+      step_key:=step->>'key';
+      bound_service_id:=nullif(step->>'upstreamId','')::uuid;
+      config_number:=(step->>'configVersion')::integer;
+      if step_key is null or bound_service_id is null or config_number is null or config_number<1 or
+        not exists(select 1 from public.bff_upstream_services u join public.bff_upstream_service_revisions r
+          on r.service_id=u.id and r.config_version=config_number and r.tenant_id=u.tenant_id and
+            r.application_id=u.application_id and r.environment=u.environment
+          where u.id=bound_service_id and u.tenant_id=saved.tenant_id and u.application_id=saved.application_id and
+            u.environment=saved.environment and u.deleted_at is null and u.config_version=config_number)
+      then raise exception 'BFF_INTERFACE_UPSTREAM_INVALID'; end if;
+      insert into public.bff_interface_upstreams(interface_id,step_key,service_id,config_version,tenant_id,
+        application_id,environment,created_by)
+        values(saved.id,step_key,bound_service_id,config_number,saved.tenant_id,saved.application_id,saved.environment,p_actor);
+    end loop;
+  else
+    update public.bff_interfaces set deleted_at=now(),version=version+1,updated_by=p_actor,updated_at=now()
+      where id=saved.id returning * into saved;
+  end if;
+  set constraints all immediate;
+  revision:=public.bff_control_advance(p_actor,'interfaces','interface.'||p_operation,saved.id,
+    jsonb_build_object('applicationId',saved.application_id,'code',saved.code,'version',saved.version,
+      'method',saved.method,'path',saved.path,'stepCount',jsonb_array_length(saved.definition->'steps')));
+  if p_operation='delete' then return jsonb_build_object('saved',true,'revision',revision); end if;
+  return public.bff_interface_public(saved.id);
+end $$;
+create or replace function public.bff_record_interface_validation(p_actor uuid,p_id uuid,p_version integer,p_issues jsonb)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; target public.bff_interfaces; revision bigint;
+begin
+  if jsonb_typeof(p_issues) is distinct from 'array' then raise exception 'BFF_INVALID_ISSUES'; end if;
+  if jsonb_array_length(p_issues)>40 or exists(select 1 from jsonb_array_elements(p_issues) as issue(value)
+    where jsonb_typeof(issue.value) is distinct from 'string' or length(issue.value#>>'{}')>500)
+  then raise exception 'BFF_INVALID_ISSUES'; end if;
+  revision:=public.bff_control_lock(p_actor,'BffInterface:Validate','interfaces');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  select * into target from public.bff_interfaces where id=p_id and tenant_id=actor.tenant_id and deleted_at is null for update;
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if not public.bff_interface_scope(p_actor,target.application_id,'BffInterface:Validate') then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_version is distinct from target.version then raise exception 'BFF_CONFLICT'; end if;
+  if jsonb_array_length(p_issues)=0 and exists(select 1 from public.bff_interface_upstreams b
+    left join public.bff_upstream_services u on u.id=b.service_id and u.tenant_id=b.tenant_id and u.application_id=b.application_id
+    where b.interface_id=p_id and (u.id is null or u.deleted_at is not null or u.config_version<>b.config_version))
+  then raise exception 'BFF_INTERFACE_UPSTREAM_CHANGED'; end if;
+  update public.bff_interfaces set validation_status=case when jsonb_array_length(p_issues)=0 then 'valid' else 'invalid' end,
+    validated_version=p_version,validation_issues=p_issues,last_validated_at=now(),updated_by=p_actor,updated_at=now()
+    where id=p_id;
+  revision:=public.bff_control_advance(p_actor,'interfaces','interface.validate',p_id,
+    jsonb_build_object('version',p_version,'issueCount',jsonb_array_length(p_issues)));
+  return public.bff_interface_public(p_id);
+end $$;
+create or replace function public.bff_record_interface_test(p_actor uuid,p_id uuid,p_version integer,p_passed boolean,
+  p_upstream_versions jsonb default '[]'::jsonb)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; target public.bff_interfaces; stale_result boolean; observed jsonb;
+  observed_id uuid; observed_config integer; observed_credential integer; observed_ids uuid[]:=array[]::uuid[];
+begin
+  if p_passed is null or jsonb_typeof(p_upstream_versions) is distinct from 'array' then raise exception 'BFF_INVALID_TEST_RESULT'; end if;
+  if jsonb_array_length(p_upstream_versions)>8 then raise exception 'BFF_INVALID_TEST_RESULT'; end if;
+  perform public.bff_control_lock(p_actor,'BffInterface:Test','interfaces');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  select * into target from public.bff_interfaces where id=p_id and tenant_id=actor.tenant_id and deleted_at is null for update;
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if not public.bff_interface_scope(p_actor,target.application_id,'BffInterface:Test') then raise exception 'BFF_FORBIDDEN'; end if;
+  if (p_passed or jsonb_array_length(p_upstream_versions)>0) and
+    exists(select 1 from jsonb_array_elements(target.definition->'steps') as step(value)
+      where step.value->>'method'<>'GET') then
+    if target.environment='production' then raise exception 'BFF_INTERFACE_WRITE_PRODUCTION'; end if;
+    if not public.bff_actor_can(p_actor,'BffInterface:TestWrite') then raise exception 'BFF_FORBIDDEN'; end if;
+  end if;
+  stale_result:=p_version is distinct from target.version or
+    not exists(select 1 from public.bff_applications a where a.id=target.application_id and a.tenant_id=target.tenant_id and a.enabled) or
+    exists(select 1 from public.bff_interface_upstreams b
+    left join public.bff_upstream_services u on u.id=b.service_id and u.tenant_id=b.tenant_id and u.application_id=b.application_id
+    where b.interface_id=p_id and (u.id is null or u.deleted_at is not null or u.config_version<>b.config_version));
+  for observed in select value from jsonb_array_elements(p_upstream_versions) loop
+    if jsonb_typeof(observed) is distinct from 'object' then raise exception 'BFF_INVALID_TEST_RESULT'; end if;
+    observed_id:=nullif(observed->>'id','')::uuid;
+    observed_config:=(observed->>'configVersion')::integer;
+    observed_credential:=(observed->>'credentialVersion')::integer;
+    if observed_id is null or observed_config is null or observed_credential is null or observed_id=any(observed_ids) or
+      not exists(select 1 from public.bff_interface_upstreams where interface_id=p_id and service_id=observed_id)
+    then raise exception 'BFF_INVALID_TEST_RESULT'; end if;
+    observed_ids:=pg_catalog.array_append(observed_ids,observed_id);
+    if not exists(select 1 from public.bff_interface_upstreams b join public.bff_upstream_services u
+      on u.id=b.service_id and u.tenant_id=b.tenant_id and u.application_id=b.application_id
+      where b.interface_id=p_id and b.service_id=observed_id and u.deleted_at is null and u.status='active' and
+        b.config_version=observed_config and u.config_version=observed_config and u.credential_version=observed_credential)
+    then stale_result:=true; end if;
+  end loop;
+  if p_passed and cardinality(observed_ids) is distinct from
+    (select count(distinct service_id) from public.bff_interface_upstreams where interface_id=p_id)
+  then stale_result:=true; end if;
+  if (p_passed or cardinality(observed_ids)>0) and exists(select 1 from public.bff_interface_upstreams b
+    join public.bff_upstream_services u on u.id=b.service_id and u.tenant_id=b.tenant_id and u.application_id=b.application_id
+    where b.interface_id=p_id and u.status<>'active') then stale_result:=true; end if;
+  if stale_result then
+    insert into public.bff_audit_events(tenant_id,actor_id,action,resource_type,resource_id,summary)
+      values(target.tenant_id,p_actor,'interface.test.stale','interfaces',p_id,
+        jsonb_build_object('expectedVersion',p_version,'currentVersion',target.version,'observedServices',cardinality(observed_ids)));
+    return public.bff_interface_public(p_id)||jsonb_build_object('stale',true);
+  end if;
+  if target.validation_status<>'valid' or target.validated_version is distinct from target.version
+  then raise exception 'BFF_INTERFACE_NOT_VALIDATED'; end if;
+  update public.bff_interfaces set last_test_status=case when p_passed then 'passed' else 'failed' end,
+    last_test_version=p_version,last_test_at=now(),updated_by=p_actor,updated_at=now() where id=p_id;
+  insert into public.bff_audit_events(tenant_id,actor_id,action,resource_type,resource_id,summary)
+    values(target.tenant_id,p_actor,'interface.test','interfaces',p_id,
+      jsonb_build_object('version',p_version,'passed',p_passed));
+  return public.bff_interface_public(p_id)||jsonb_build_object('stale',false);
+end $$;
+revoke all on function public.bff_interface_scope(uuid,uuid,text),public.bff_interface_public(uuid),
+  public.bff_read_interfaces(uuid,jsonb),public.bff_interface_options(uuid),public.bff_interface_target(uuid,uuid,text),
+  public.bff_interface_references(uuid,uuid),public.bff_write_interface(uuid,text,uuid,integer,jsonb),
+  public.bff_record_interface_validation(uuid,uuid,integer,jsonb),public.bff_record_interface_test(uuid,uuid,integer,boolean,jsonb)
+  from public,anon,authenticated;
+grant execute on function public.bff_interface_scope(uuid,uuid,text),public.bff_interface_public(uuid),
+  public.bff_read_interfaces(uuid,jsonb),public.bff_interface_options(uuid),public.bff_interface_target(uuid,uuid,text),
+  public.bff_interface_references(uuid,uuid),public.bff_write_interface(uuid,text,uuid,integer,jsonb),
+  public.bff_record_interface_validation(uuid,uuid,integer,jsonb),public.bff_record_interface_test(uuid,uuid,integer,boolean,jsonb)
+  to service_role;
 alter table public.bff_members enable row level security;
 alter table public.bff_applications enable row level security;
 alter table public.bff_application_members enable row level security;
@@ -1517,6 +1903,11 @@ alter table public.bff_upstream_service_revisions enable row level security;
 revoke all on public.bff_upstream_services,public.bff_upstream_credentials,public.bff_upstream_service_revisions from public,anon,authenticated;
 revoke all on public.bff_upstream_services,public.bff_upstream_credentials,public.bff_upstream_service_revisions from service_role;
 grant select,insert,update,delete on public.bff_upstream_services,public.bff_upstream_credentials,public.bff_upstream_service_revisions to service_role;
+alter table public.bff_interfaces enable row level security;
+alter table public.bff_interface_upstreams enable row level security;
+revoke all on public.bff_interfaces,public.bff_interface_upstreams from public,anon,authenticated;
+revoke all on public.bff_interfaces,public.bff_interface_upstreams from service_role;
+grant select,insert,update,delete on public.bff_interfaces,public.bff_interface_upstreams to service_role;
 alter table public.bff_resource_revisions enable row level security;
 alter table public.bff_menus enable row level security;
 alter table public.bff_roles enable row level security;

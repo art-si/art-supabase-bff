@@ -1,6 +1,6 @@
 # art-supabase-bff
 
-基于 art-supabase-pro npm 主仓组件体系的 BFF 平台，已接入统一认证、应用管理、菜单、字典、角色、成员与上游服务管理。
+基于 art-supabase-pro npm 主仓组件体系的 BFF 平台，已接入统一认证、应用管理、菜单、字典、角色、成员、上游服务和接口编排。
 
 ## 边界
 
@@ -76,6 +76,15 @@ Windows 上可复用已登录的 Supabase CLI 凭据执行初始化工具，凭�
 - 网络策略留空时，可先登记 HTTPS 草稿。连接检测不发送凭据、不跟随重定向，仅表示网络可达，不能作为业务认证通过的依据。
 - 删除前检查引用并停用服务；删除归档配置、移除凭据，保留不可变配置版本和操作审计。
 
+## 接口编排
+
+通过 **服务管理 → 接口编排**，声明调用参数、编排步骤与响应字段。接口按应用和环境隔离，支持 1–8 个顺序执行的 HTTP 步骤；后续步骤可通过 JSON Pointer 读取前序步骤字段。输入与映射值支持文本、数字和布尔类型，响应输出为显式声明的标量字段。
+
+- 创建和修改保存为草稿；修改后需重新验证。验证检查参数、路径占位符、步骤顺序及绑定的上游配置版本。上游配置变化后须重新选择版本并验证。
+- 试运行要求当前草稿已验证、应用及上游已启用，并通过出站策略与凭据就绪检查。总执行时限为 30 秒，前序失败时后续步骤跳过。页面展示步骤摘要和映射结果；配置或凭据在执行期间变化时，结果标为过期。
+- `BffInterface:Test` 控制普通测试；非 GET 步骤还需 `BffInterface:TestWrite`。写测试仅用于开发或预发布环境，并须配置 `BFF_INTERFACE_TEST_WRITE_ORIGINS` 为受控测试源站，同时包含在 `BFF_UPSTREAM_ALLOWED_ORIGINS` 中。生产草稿测试始终只允许 GET。
+- 上游存在接口引用时，通过共用关联检查定位接口并处理绑定，再删除上游。草稿暂不提供对外调用入口；发布与回滚按已确认路线继续开发。
+
 ## 验证
 
 ```powershell
@@ -89,7 +98,7 @@ node --use-env-proxy --import tsx tests/integration/http-security.ts
 
 浏览器回归和最后一项需要本地服务运行于 http://localhost:3012，可通过 BFF_TEST_ORIGIN 指定其他本机端口。浏览器回归只使用合成 API 数据，验证实际 npm 页面和动态路由；真实 API 检查使用右边数据库中的隔离测试租户，结束后清理所有测试记录。这两项都不能代替真实统一登录验收。
 
-代理环境运行本机 HTTP 联测时，先设置 `$env:NO_PROXY='localhost,127.0.0.1'`。数据库回滚验证包含 `control-plane-schema.sql`、`role-access.sql`、`application-authorization.sql` 和 `upstream-schema.sql`；仅执行 `ValidateBffSchema` 不提交结构变更。
+代理环境运行本机 HTTP 联测时，先设置 `$env:NO_PROXY='localhost,127.0.0.1'`。数据库回滚验证包含 `control-plane-schema.sql`、`role-access.sql`、`application-authorization.sql`、`upstream-schema.sql` 和 `interface-schema.sql`；仅执行 `ValidateBffSchema` 不提交结构变更。
 
 成员页视觉数据可通过 `node --use-env-proxy --import tsx tests/integration/ui-fixtures.ts apply` 准备，并以同命令的 `remove` 清理。该工具只创建两条停用、无法匹配 pro 签发者的临时验收记录，不创建身份中心账号、不授予访问权限；验收后必须清理。
 

@@ -69,6 +69,7 @@ const menuComponents = new Set([
   '/index/index',
   '/bff/applications/index',
   '/bff/upstreams/index',
+  '/bff/interfaces/index',
   '/shared/system/menu',
   '/shared/system/role',
   '/bff/system/member/index',
@@ -258,13 +259,16 @@ export async function writeControl(
 export async function controlReferences(req: IncomingMessage, session: Session): Promise<unknown> {
   requireMutation(req, session)
   const input = await body(req, 65536)
-  if (input.table === 'bff_upstream_services') {
+  if (input.table === 'bff_upstream_services' || input.table === 'bff_interfaces') {
     const ids = idsInput(input.ids)
-    if (ids.length !== 1) throw new HttpError(400, '请逐条检查上游服务的关联记录')
-    const result = await database.rpc('bff_upstream_references', {
-      p_actor: session.member.id,
-      p_id: ids[0]
-    })
+    if (ids.length !== 1) throw new HttpError(400, '请逐条检查业务记录的关联')
+    const result = await database.rpc(
+      input.table === 'bff_interfaces' ? 'bff_interface_references' : 'bff_upstream_references',
+      {
+        p_actor: session.member.id,
+        p_id: ids[0]
+      }
+    )
     controlFailure(result.error)
     return result.data
   }
@@ -370,7 +374,8 @@ export async function tableColumnRuntime(session: Session, url: URL): Promise<un
     '/system/member': 'System:Member:View',
     '/data-center/dict': 'DataCenter:Dict:View',
     '/applications': 'BffApplication:View',
-    '/upstreams': 'BffUpstream:View'
+    '/upstreams': 'BffUpstream:View',
+    '/interfaces': 'BffInterface:View'
   }
   const routePath = url.searchParams.get('routePath') || ''
   const permission = Object.hasOwn(routes, routePath) ? routes[routePath] : undefined

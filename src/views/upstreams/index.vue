@@ -279,6 +279,15 @@
         routeQuery: (record) => ({ recordId: record.targetId }),
         canNavigate: () => hasAuth('BffUpstream:View'),
         order: 10
+      },
+      bff_interfaces: {
+        label: '接口草稿',
+        description: '请在接口编排中调整上游绑定，再删除此服务。',
+        actionLabel: '查看接口',
+        routeName: 'BffInterfaces',
+        routeQuery: (record) => ({ recordId: record.targetId }),
+        canNavigate: () => hasAuth('BffInterface:View'),
+        order: 20
       }
     }
   )

@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation')][string]$Action = 'Inspect',
+  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -89,11 +89,16 @@ function Invoke-BffQuery([string]$Query) {
   $taskResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json; charset=utf-8' -Body $taskBody
   return (Read-Utf8JsonResponse $taskResponse)
 }
-if ($Action -eq 'EnableUpstreamNavigation') {
+if ($Action -in @('EnableUpstreamNavigation','EnableInterfaceNavigation')) {
   if ([string]::IsNullOrWhiteSpace($Login)) { throw 'Provide the existing BFF administrator email.' }
-  if (!(Test-Path -LiteralPath 'src/views/upstreams/index.vue')) { throw 'Install and verify the upstream UI before enabling navigation.' }
+  $taskCapability = if ($Action -eq 'EnableInterfaceNavigation') { 'interfaces' } else { 'upstreams' }
+  $taskPageName = if ($taskCapability -eq 'interfaces') { 'BffInterfaces' } else { 'BffUpstreams' }
+  $taskPermissionPrefix = if ($taskCapability -eq 'interfaces') { 'BffInterface' } else { 'BffUpstream' }
+  $taskActions = if ($taskCapability -eq 'interfaces') { @('View','Add','Edit','Validate','Test','TestWrite','Delete') } else { @('View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete') }
+  $taskPermissionSql = ($taskActions | ForEach-Object { "'$($taskPermissionPrefix):$_'" }) -join ','
+  if (!(Test-Path -LiteralPath "src/views/$taskCapability/index.vue")) { throw 'Install and verify the capability UI before enabling navigation.' }
   $taskHealth = Invoke-RestMethod -Uri ($AppOrigin.TrimEnd('/') + '/api/health')
-  if ($taskHealth.status -ne 'ok' -or 'upstreams' -notin $taskHealth.capabilities) { throw 'The running BFF host does not declare the upstream capability.' }
+  if ($taskHealth.status -ne 'ok' -or $taskCapability -notin $taskHealth.capabilities) { throw 'The running BFF host does not declare this capability.' }
   $taskAccount = $Login.Trim().Replace("'", "''")
   $taskEnableSql = @"
 begin;
@@ -108,25 +113,25 @@ begin
   perform public.bff_control_lock(actor.id,'System:Menu:Edit','menus');
   if (select count(*) from public.bff_menus where tenant_id=actor.tenant_id and builtin and
     ((name='BffServiceManagement' and path='/services' and type='folder') or
-     (name='BffUpstreams' and path='/upstreams' and component='/bff/upstreams/index' and type='menu')))<>2
-  then raise exception 'Reviewed upstream navigation entries are missing'; end if;
-  select id into page from public.bff_menus where tenant_id=actor.tenant_id and name='BffUpstreams';
+     (name='$taskPageName' and path='/$taskCapability' and component='/bff/$taskCapability/index' and type='menu')))<>2
+  then raise exception 'Reviewed navigation entries are missing'; end if;
+  select id into page from public.bff_menus where tenant_id=actor.tenant_id and name='$taskPageName';
   if (select count(*) from public.bff_menus where tenant_id=actor.tenant_id and parent_id=page and builtin and type='button'
-    and name in ('BffUpstream:View','BffUpstream:Add','BffUpstream:Edit','BffUpstream:ChangeStatus','BffUpstream:Test','BffUpstream:RotateSecret','BffUpstream:Delete'))<>7
-  then raise exception 'Reviewed upstream permission entries are missing'; end if;
+    and name in ($taskPermissionSql))<>$($taskActions.Count)
+  then raise exception 'Reviewed permission entries are missing'; end if;
   update public.bff_menus set meta=jsonb_set(meta,'{isEnable}','true'::jsonb),version=version+1,
     update_by=actor.id,update_time=now() where tenant_id=actor.tenant_id and builtin
-    and (name in ('BffServiceManagement','BffUpstreams') or (parent_id=page and type='button' and
-      name in ('BffUpstream:View','BffUpstream:Add','BffUpstream:Edit','BffUpstream:ChangeStatus','BffUpstream:Test','BffUpstream:RotateSecret','BffUpstream:Delete')))
+    and (name in ('BffServiceManagement','$taskPageName') or (parent_id=page and type='button' and
+      name in ($taskPermissionSql)))
     and meta->'isEnable' is distinct from 'true'::jsonb;
   get diagnostics changed=row_count;
   if changed>0 then perform public.bff_control_advance(actor.id,'menus','menu.capability.enable',page,
-    jsonb_build_object('capability','upstreams','changed',changed)); end if;
+    jsonb_build_object('capability','$taskCapability','changed',changed)); end if;
 end `$`$;
 commit;
 "@
   $null = Invoke-BffQuery $taskEnableSql
-  Write-Output 'Upstream navigation enabled for the existing administrator tenant after host capability verification.'
+  Write-Output 'Reviewed navigation enabled for the existing administrator tenant after host capability verification.'
   exit
 }
 if ($Action -eq 'CleanupUpstreamFixtures') {
@@ -164,6 +169,8 @@ lock table public.bff_upstream_service_revisions in share row exclusive mode;
 alter table public.bff_upstream_service_revisions disable trigger bff_upstream_revision_guard;
 delete from public.bff_sessions where member_id=any($taskMemberSql);
 delete from public.bff_audit_events where tenant_id=any($taskTenantSql);
+delete from public.bff_interface_upstreams where tenant_id=any($taskTenantSql);
+delete from public.bff_interfaces where tenant_id=any($taskTenantSql);
 delete from public.bff_upstream_credentials where tenant_id=any($taskTenantSql);
 delete from public.bff_upstream_service_revisions where tenant_id=any($taskTenantSql);
 alter table public.bff_upstream_service_revisions enable trigger bff_upstream_revision_guard;
@@ -254,7 +261,7 @@ select jsonb_build_object(
     if (@($taskBackup.tables.$taskName).Count -ne [int]$taskDatabaseSnapshot.rowCounts.$taskName) { throw 'BFF recovery row counts do not match.' }
   }
   $taskVerification = ''
-  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql')) {
+  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql')) {
     if (Test-Path -LiteralPath $taskVerificationPath) {
       $taskVerificationPart = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskVerificationPath
       if ($taskVerificationPart -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }
