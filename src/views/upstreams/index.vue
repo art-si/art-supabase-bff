@@ -259,6 +259,7 @@
       type: 'add',
       label: '登记上游服务',
       permission: 'BffUpstream:Add',
+      buttonProps: { type: 'primary', plain: false },
       disabled:
         optionsLoading.value ||
         !options.value?.applications.some((application) => application.enabled),
