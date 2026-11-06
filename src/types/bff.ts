@@ -5,13 +5,8 @@ export interface BffUser {
   role: 'admin' | 'viewer'
   tenantId: string
 }
-export interface BffMenu {
-  path: string
-  name: string
-  component: string
-  title: string
-  icon: string
-}
+import type { AppRouteRecord } from 'art-supabase-pro/src/types/router/index'
+export type BffMenu = AppRouteRecord
 export interface BffSession {
   user: BffUser
   csrfToken: string

@@ -87,7 +87,12 @@ export async function listApplications(session: Session, url: URL): Promise<unkn
   const rows = requireData(result)
   return {
     records: rows.map((row) => ({
-      ...row,
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      description: row.description,
+      enabled: row.enabled,
+      version: row.version,
       homeUrl: row.home_url,
       createdAt: row.created_at,
       updatedAt: row.updated_at

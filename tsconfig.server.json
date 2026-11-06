@@ -1,0 +1,14 @@
+{
+  "extends": "./node_modules/art-supabase-pro/tsconfig.consumer.json",
+  "compilerOptions": {
+    "lib": ["esnext"],
+    "types": ["node"]
+  },
+  "include": [
+    "server/**/*.ts",
+    "tests/unit/**/*.ts",
+    "tests/integration/**/*.ts",
+    "tests/fixtures/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

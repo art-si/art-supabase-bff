@@ -15,7 +15,7 @@ export class BffApiError extends Error {
     super(message)
   }
 }
-async function call<T>(url: string, options: RequestInit = {}): Promise<T> {
+export async function call<T>(url: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(url, {
     ...options,
     credentials: 'same-origin',

@@ -25,9 +25,8 @@ const session: BffSession = {
     {
       path: '/applications',
       name: 'BffApplications',
-      component: 'applications/index',
-      title: '布局验证',
-      icon: 'ri:apps-2-line'
+      component: '/bff/applications/index',
+      meta: { title: '布局验证', icon: 'ri:apps-2-line' }
     }
   ]
 }
@@ -58,6 +57,10 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/api/health') {
     reply({ authenticationConfigured: true })
+    return
+  }
+  if (url.pathname === '/api/control/dictionaries') {
+    reply({ revision: 1, types: [], items: [] })
     return
   }
   if (url.pathname === '/api/auth/logout') {

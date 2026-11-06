@@ -12,6 +12,19 @@ import {
 } from './applications'
 import { HttpError, json, redirect } from './http'
 import { safeReturnPath } from './security'
+import {
+  readMenus,
+  readDictionaries,
+  writeControl,
+  controlFailure,
+  controlReferences,
+  uniqueControlField,
+  dictionaryDisplay,
+  tableColumnRuntime
+} from './control-plane'
+import { database } from './database/client'
+import TreeUtils from 'art-supabase-pro/src/utils/tree.ts'
+import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 
 let vite: import('vite').ViteDevServer | undefined
 let viteReady: Promise<import('vite').ViteDevServer> | undefined
@@ -41,6 +54,15 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     }
     const session = await authenticate(req)
     if (url.pathname === '/api/auth/session' && req.method === 'GET') {
+      const [permissions, navigation] = await Promise.all([
+        database.rpc('bff_actor_permissions', { p_actor: session.member.id }),
+        database.rpc('bff_navigation', { p_actor: session.member.id })
+      ])
+      controlFailure(permissions.error)
+      controlFailure(navigation.error)
+      const nodes: unknown = navigation.data
+      if (!Array.isArray(nodes) || !nodes.every(isObjectRecord))
+        throw new Error('Invalid navigation response')
       json(res, {
         user: {
           id: session.member.id,
@@ -50,25 +72,45 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
           tenantId: session.member.tenant_id
         },
         csrfToken: session.row.csrf_token,
-        permissions:
-          session.member.role === 'admin'
-            ? [
-                'BffApplication:View',
-                'BffApplication:Add',
-                'BffApplication:Edit',
-                'BffApplication:Grant'
-              ]
-            : ['BffApplication:View'],
-        menu: [
-          {
-            path: '/applications',
-            name: 'BffApplications',
-            component: 'applications/index',
-            title: '应用管理',
-            icon: 'ri:apps-2-line'
-          }
-        ]
+        permissions: permissions.data,
+        menu: new TreeUtils({ parentKey: 'parentId' }).listToTree(nodes)
       })
+      return
+    }
+    if (url.pathname === '/api/control/menus' && req.method === 'GET') {
+      json(res, await readMenus(session, url.searchParams.get('catalog') === '1'))
+      return
+    }
+    if (url.pathname === '/api/control/dictionaries' && req.method === 'GET') {
+      json(res, await readDictionaries(session, url.searchParams.get('options') === '1'))
+      return
+    }
+    if (url.pathname === '/api/control/references' && req.method === 'POST') {
+      json(res, await controlReferences(req, session))
+      return
+    }
+    if (url.pathname === '/api/control/unique' && req.method === 'POST') {
+      json(res, await uniqueControlField(req, session))
+      return
+    }
+    if (url.pathname === '/api/control/dictionary-display' && req.method === 'GET') {
+      json(res, await dictionaryDisplay(session, url))
+      return
+    }
+    if (url.pathname === '/api/control/table-columns' && req.method === 'GET') {
+      json(res, await tableColumnRuntime(session, url))
+      return
+    }
+    const controlResource = /^\/api\/control\/(menus|dictionary-types|dictionary-items)$/.exec(
+      url.pathname
+    )?.[1]
+    if (
+      req.method === 'POST' &&
+      (controlResource === 'menus' ||
+        controlResource === 'dictionary-types' ||
+        controlResource === 'dictionary-items')
+    ) {
+      json(res, await writeControl(req, session, controlResource))
       return
     }
     if (url.pathname === '/api/applications') {

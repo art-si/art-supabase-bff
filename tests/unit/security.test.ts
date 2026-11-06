@@ -13,6 +13,7 @@ import {
 } from '../../server/security'
 import { applicationInput } from '../../server/applications'
 import { requireAdmin, requireMutation, type Member, type Session } from '../../server/auth'
+import { config } from '../../server/config'
 import type { IncomingMessage } from 'node:http'
 
 test('session encryption authenticates payloads and rejects tampering or a different key', () => {
@@ -119,8 +120,6 @@ test('mutations require both an exact origin and the session CSRF token', () => 
   const request = (origin: string, token: string) =>
     ({ headers: { origin, 'x-csrf-token': token } }) satisfies Pick<IncomingMessage, 'headers'>
   assert.throws(() => requireMutation(request('https://evil.example', 'known-token'), session))
-  assert.throws(() => requireMutation(request('http://localhost:3010', 'forged-token'), session))
-  assert.doesNotThrow(() =>
-    requireMutation(request('http://localhost:3010', 'known-token'), session)
-  )
+  assert.throws(() => requireMutation(request(config.origin, 'forged-token'), session))
+  assert.doesNotThrow(() => requireMutation(request(config.origin, 'known-token'), session))
 })

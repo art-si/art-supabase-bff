@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { defineConfig, type AliasOptions } from 'vite'
+import { defineConfig, loadEnv, type AliasOptions } from 'vite'
 
 const applicationRoot = fileURLToPath(new URL('.', import.meta.url))
 // Explicit override supports joint development; normal installs always use the npm package.
@@ -17,13 +17,14 @@ if (process.argv.includes('--typecheck')) {
 }
 
 export default defineConfig(async ({ mode }) => {
+  const bffEnv = loadEnv(mode, applicationRoot, 'BFF_')
   const { createModuleViteConfig } = await import(
     pathToFileURL(path.join(platformRoot, 'scripts/module-vite-config.mjs')).href
   )
   const config = await createModuleViteConfig({
     appCode: 'bff',
     applicationRoot,
-    defaultPort: Number(process.env.BFF_PORT || 3010),
+    defaultPort: Number(process.env.BFF_PORT || bffEnv.BFF_PORT || 3010),
     mode,
     platformRoot,
     inheritPlatformEnv: false,
@@ -31,6 +32,17 @@ export default defineConfig(async ({ mode }) => {
   })
   const aliases = config.resolve?.alias as Record<string, string>
   const alias: AliasOptions = [
+    ...[
+      'system-manage',
+      'data-center',
+      'unique-field',
+      'master-data-delete',
+      'table-column-config',
+      'unit-of-measure'
+    ].map((name) => ({
+      find: new RegExp(`^@/api/${name}$`),
+      replacement: path.join(applicationRoot, `src/api/${name}.ts`)
+    })),
     {
       find: /^@\/router(?:\/index)?$/,
       replacement: path.join(applicationRoot, 'src/router/index.ts')
@@ -39,6 +51,10 @@ export default defineConfig(async ({ mode }) => {
   ]
   return {
     ...config,
+    optimizeDeps: {
+      ...config.optimizeDeps,
+      exclude: [...(config.optimizeDeps?.exclude ?? []), 'art-supabase-pro']
+    },
     resolve: { ...config.resolve, alias },
     build: { ...config.build, outDir: 'dist' }
   }

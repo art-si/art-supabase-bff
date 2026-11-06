@@ -1,0 +1,9 @@
+# Host-owned approvals, aligned with the reviewed pro toolchain.
+allowBuilds:
+  '@parcel/watcher': true
+  core-js: true
+  core-js-pure: false
+  es5-ext: true
+  esbuild: true
+  tesseract.js: false
+  vue-demi: true

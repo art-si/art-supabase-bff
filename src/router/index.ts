@@ -6,7 +6,8 @@ import { registerApplicationViewModules } from '@/router/core/component-loader'
 import { setupAfterEachGuard } from '@/router/guards/after-each'
 import { useMenuStore } from '@/store/modules/menu'
 import { useWorktabStore } from '@/store/modules/worktab'
-import type { AppRouteRecord } from '@/types/router'
+import { useUserStore } from '@/store/modules/user'
+import { notifyFriendlyError } from '@/hooks/core/useArtFeedback'
 import { bffSession, loadSession } from '@bff/api/bff'
 
 export const HOME_PAGE_PATH = '/applications'
@@ -15,6 +16,10 @@ registerApplicationViewModules(
   '/src/views',
   import.meta.glob<{ default: Component }>('/src/views/**/*.vue')
 )
+registerApplicationViewModules('shared', '/shared', {
+  '/shared/system/menu.vue': () => import('@/views/system/menu/index.vue'),
+  '/shared/data-center/dict.vue': () => import('@/views/data-center/dict/index.vue')
+})
 
 export const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -44,6 +49,20 @@ export function initRouter(app: App<Element>): void {
   const registry = new RouteRegistry(router)
   const menuStore = useMenuStore()
   watch(bffSession, (session) => {
+    const userStore = useUserStore()
+    userStore.clearDictionaryCache()
+    userStore.setUserInfo(
+      session
+        ? {
+            userId: session.user.id,
+            nickName: session.user.name,
+            email: session.user.email,
+            tenantId: session.user.tenantId,
+            platformSuper: false
+          }
+        : {}
+    )
+    userStore.setLoginStatus(Boolean(session))
     if (session) return
     registry.unregister()
     menuStore.setMenuList([])
@@ -58,14 +77,15 @@ export function initRouter(app: App<Element>): void {
         return false
       }
       if (!registry.isRegistered()) {
-        const menus: AppRouteRecord[] = bffSession.value.menu.map((menu) => ({
-          path: menu.path,
-          name: menu.name,
-          component: `/bff/${menu.component}`,
-          meta: { title: menu.title, icon: menu.icon, keepAlive: true }
-        }))
+        try {
+          await useUserStore().fetchDictList()
+        } catch (error) {
+          notifyFriendlyError(error, '基础选项暂时无法加载，请稍后刷新页面', 'warning')
+        }
+        const menus = bffSession.value.menu
         menuStore.setMenuList(menus)
         registry.register(menus)
+        useWorktabStore().validateWorktabs(router)
         return { path: to.path === '/' ? menuStore.getHomePath() : to.fullPath, replace: true }
       }
       if (to.path === '/') return menuStore.getHomePath()

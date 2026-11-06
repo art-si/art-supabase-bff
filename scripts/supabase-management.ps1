@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember')][string]$Action = 'Inspect',
+  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -78,7 +78,89 @@ if ($Action -eq 'InspectAuthorization') {
   exit
 }
 function Invoke-BffQuery([string]$Query) {
-  Invoke-RestMethod -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json' -Body (@{query=$Query} | ConvertTo-Json -Compress)
+  $taskBody = [Text.Encoding]::UTF8.GetBytes((@{query=$Query} | ConvertTo-Json -Compress))
+  $taskResult = Invoke-RestMethod -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json; charset=utf-8' -Body $taskBody
+  return $taskResult
+}
+if ($Action -in @('ValidateBffSchema','ApplyCanonicalBff')) {
+  $taskSql = Get-Content -Raw -LiteralPath 'server/database/schema.sql'
+  if ($taskSql -notmatch 'exclusively for project bksbwnxdurmuolygiofh' -or $taskSql -notmatch 'begin;' -or $taskSql -notmatch 'commit;\s*$') {
+    throw 'The canonical BFF schema must declare its project and one complete transaction.'
+  }
+  $taskMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
+  if ($taskMcp.mcpServers.supabase.url -notmatch 'project_ref=bksbwnxdurmuolygiofh(?:&|$)') { throw 'BFF project scope mismatch.' }
+  $taskTables = @(Invoke-BffQuery "select tablename from pg_tables where schemaname='public' and tablename ~ '^bff_[a-z_]+$' order by tablename")
+  $taskDataQueries = @()
+  foreach ($taskTable in $taskTables) {
+    $taskName = [string]$taskTable.tablename
+    if ($taskName -notmatch '^bff_[a-z_]+$') { throw 'Invalid BFF table identifier.' }
+    $taskDataQueries += "select '$taskName'::text as name,coalesce(jsonb_agg(to_jsonb(record)),'[]'::jsonb) as rows from public.$taskName record"
+  }
+  $taskFunctionQuery = "select p.oid::regprocedure::text as signature,pg_get_functiondef(p.oid) as definition,p.proacl as grants from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname ~ '^bff_[a-z_]+$' and p.prokind='f'"
+  $taskStructureQuery = @'
+select c.relname as name,c.relrowsecurity as rls,c.relforcerowsecurity as force_rls,c.relacl as grants,
+  pg_get_userbyid(c.relowner) as owner,
+  (select jsonb_agg(jsonb_build_object('name',a.attname,'type',format_type(a.atttypid,a.atttypmod),'not_null',a.attnotnull,
+    'default',pg_get_expr(d.adbin,d.adrelid),'identity',a.attidentity,'generated',a.attgenerated) order by a.attnum)
+    from pg_attribute a left join pg_attrdef d on d.adrelid=a.attrelid and d.adnum=a.attnum
+    where a.attrelid=c.oid and a.attnum>0 and not a.attisdropped) as columns,
+  (select coalesce(jsonb_agg(jsonb_build_object('name',k.conname,'definition',pg_get_constraintdef(k.oid,true),'validated',k.convalidated)),'[]'::jsonb)
+    from pg_constraint k where k.conrelid=c.oid) as constraints,
+  (select coalesce(jsonb_agg(jsonb_build_object('name',i.relname,'definition',pg_get_indexdef(i.oid),
+    'constraint_owned',exists(select 1 from pg_constraint k where k.conindid=i.oid))),'[]'::jsonb)
+    from pg_index x join pg_class i on i.oid=x.indexrelid where x.indrelid=c.oid) as indexes,
+  (select coalesce(jsonb_agg(jsonb_build_object('name',t.tgname,'definition',pg_get_triggerdef(t.oid,true))),'[]'::jsonb)
+    from pg_trigger t where t.tgrelid=c.oid and not t.tgisinternal) as triggers,
+  (select coalesce(jsonb_agg(to_jsonb(p)),'[]'::jsonb) from pg_policies p where p.schemaname='public' and p.tablename=c.relname) as policies
+from pg_class c join pg_namespace n on n.oid=c.relnamespace
+where n.nspname='public' and c.relkind='r' and c.relname ~ '^bff_[a-z_]+$' order by c.relname
+'@
+  $taskDataQuery = if ($taskDataQueries.Count) { $taskDataQueries -join ' union all ' } else { "select null::text as name,'[]'::jsonb as rows where false" }
+  # One PostgreSQL statement captures related rows and live definitions in the same MVCC snapshot.
+  $taskSnapshotQuery = @"
+with data_rows as materialized ($taskDataQuery),structures as ($taskStructureQuery),functions as ($taskFunctionQuery)
+select jsonb_build_object(
+  'capturedAt',statement_timestamp(),
+  'tables',(select coalesce(jsonb_object_agg(name,rows),'{}'::jsonb) from data_rows),
+  'rowCounts',(select coalesce(jsonb_object_agg(name,jsonb_array_length(rows)),'{}'::jsonb) from data_rows),
+  'structures',(select coalesce(jsonb_agg(to_jsonb(s)),'[]'::jsonb) from structures s),
+  'functions',(select coalesce(jsonb_agg(to_jsonb(f)),'[]'::jsonb) from functions f)
+) as snapshot
+"@
+  $taskDatabaseSnapshots = @(Invoke-BffQuery $taskSnapshotQuery)
+  if ($taskDatabaseSnapshots.Count -ne 1) { throw 'BFF database snapshot response is invalid.' }
+  $taskDatabaseSnapshot = $taskDatabaseSnapshots[0].snapshot
+  $taskBeforeSource = (& git show HEAD:server/database/schema.sql) -join "`n"
+  if ($LASTEXITCODE -ne 0) { throw 'Cannot capture the committed schema recovery baseline.' }
+  $taskBackupDirectory = Join-Path (Get-Location) '.artifacts/database'
+  New-Item -ItemType Directory -Path $taskBackupDirectory -Force | Out-Null
+  $taskBackupPath = Join-Path $taskBackupDirectory ('bff-core-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '.json')
+  $taskSnapshot = @{ project=$bffRef; capturedAt=$taskDatabaseSnapshot.capturedAt; sourceSnapshot=$taskBeforeSource; structures=$taskDatabaseSnapshot.structures; tables=$taskDatabaseSnapshot.tables; functions=$taskDatabaseSnapshot.functions; rowCounts=$taskDatabaseSnapshot.rowCounts }
+  [IO.File]::WriteAllText($taskBackupPath,($taskSnapshot | ConvertTo-Json -Depth 60),[Text.Encoding]::UTF8)
+  $taskBackup = Get-Content -Raw -LiteralPath $taskBackupPath | ConvertFrom-Json
+  if ($taskBackup.project -ne $bffRef -or @($taskBackup.tables.PSObject.Properties).Count -ne $taskTables.Count -or @($taskBackup.structures).Count -ne $taskTables.Count) { throw 'BFF recovery baseline verification failed.' }
+  foreach ($taskTable in $taskTables) {
+    $taskName = [string]$taskTable.tablename
+    if (@($taskBackup.tables.$taskName).Count -ne [int]$taskDatabaseSnapshot.rowCounts.$taskName) { throw 'BFF recovery row counts do not match.' }
+  }
+  $taskVerification = ''
+  $taskVerificationPath = 'tests/integration/control-plane-schema.sql'
+  if (Test-Path -LiteralPath $taskVerificationPath) {
+    $taskVerification = Get-Content -Raw -LiteralPath $taskVerificationPath
+    if ($taskVerification -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }
+  }
+  $taskCommit = [regex]::Match($taskSql, 'commit;\s*$')
+  $taskValidationSql = $taskSql.Substring(0,$taskCommit.Index) + $taskVerification + "`nset constraints all immediate; rollback;"
+  $null = Invoke-BffQuery $taskValidationSql
+  if ($Action -eq 'ValidateBffSchema') {
+    Write-Output ('Canonical schema validated with ROLLBACK for BFF ' + $bffRef + '; recovery baseline verified for ' + $taskTables.Count + ' tables. No schema change committed.')
+    exit
+  }
+  $null = Invoke-BffQuery $taskSql
+  $taskPermissions = Invoke-BffQuery "select c.relname as name,c.relrowsecurity as rls,has_table_privilege('anon',c.oid,'select,insert,update,delete') as anon_access,has_table_privilege('authenticated',c.oid,'select,insert,update,delete') as authenticated_access from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r' and c.relname ~ '^bff_[a-z_]+$' order by c.relname"
+  if (@($taskPermissions | Where-Object { -not $_.rls -or $_.anon_access -or $_.authenticated_access }).Count) { throw 'BFF table permission verification failed.' }
+  Write-Output ('Canonical schema applied only to BFF ' + $bffRef + '; RLS and browser-role read denial verified for ' + @($taskPermissions).Count + ' tables.')
+  exit
 }
 if ($Action -eq 'InspectMembers') {
   Invoke-BffQuery "select m.email,m.display_name,m.role,m.enabled,count(am.application_id)::integer as application_grants,(select count(*)::integer from public.bff_sessions s where s.member_id=m.id and s.expires_at>now()) as active_sessions from public.bff_members m left join public.bff_application_members am on am.member_id=m.id group by m.id order by m.created_at,m.email" | ConvertTo-Json -Depth 5

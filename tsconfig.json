@@ -6,6 +6,12 @@
       "@bff/*": ["src/*"],
       "@/router": ["src/router/index.ts"],
       "@/router/index": ["src/router/index.ts"],
+      "@/api/system-manage": ["src/api/system-manage.ts"],
+      "@/api/data-center": ["src/api/data-center.ts"],
+      "@/api/unique-field": ["src/api/unique-field.ts"],
+      "@/api/table-column-config": ["src/api/table-column-config.ts"],
+      "@/api/master-data-delete": ["src/api/master-data-delete.ts"],
+      "@/api/unit-of-measure": ["src/api/unit-of-measure.ts"],
       "@/*": ["node_modules/art-supabase-pro/src/*"],
       "@views/*": ["node_modules/art-supabase-pro/src/views/*"],
       "@styles/*": ["node_modules/art-supabase-pro/src/assets/styles/*"],
@@ -17,6 +23,6 @@
       ]
     }
   },
-  "include": ["src/**/*", "server/**/*.ts", "tests/**/*.ts", "vite.config.ts"],
+  "include": ["src/**/*", "vite.config.ts"],
   "exclude": ["node_modules", "dist"]
 }
