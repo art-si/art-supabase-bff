@@ -1,5 +1,10 @@
 import { shallowRef } from 'vue'
-import type { ApplicationInput, ApplicationList, ApplicationMember, BffSession } from '@/types/bff'
+import type {
+  ApplicationInput,
+  ApplicationList,
+  ApplicationMember,
+  BffSession
+} from '@bff/types/bff'
 
 export const bffSession = shallowRef<BffSession | null>(null)
 export class BffApiError extends Error {

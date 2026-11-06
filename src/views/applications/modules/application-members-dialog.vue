@@ -18,8 +18,8 @@
 <script setup lang="tsx">
   import { ElSwitch } from 'element-plus'
   import type { ColumnOption } from '@/types'
-  import { fetchApplicationMembers, setApplicationMember, BffApiError } from '@/api/bff'
-  import type { ApplicationMember, BffApplication } from '@/types/bff'
+  import { fetchApplicationMembers, setApplicationMember, BffApiError } from '@bff/api/bff'
+  import type { ApplicationMember, BffApplication } from '@bff/types/bff'
   import type { ArtDialogExpose } from '@/components/core/dialogs/art-dialog/types'
   const dialogRef = ref<ArtDialogExpose>()
   const members = reactive<{

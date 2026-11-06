@@ -9,3 +9,6 @@ dist/
 playwright/.auth/
 test-results/
 supabase/.temp/
+
+# Generated registrations point at the installed platform package.
+.agents/skills/

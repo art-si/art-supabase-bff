@@ -1,16 +1,21 @@
-import { createApp } from 'vue'
-import { createPinia } from 'pinia'
-import piniaPluginPersistedstate from 'pinia-plugin-persistedstate'
-import App from './App.vue'
-import { router } from './router'
-import i18n from './locales'
-import { setupGlobDirectives } from './directives'
-import '@styles/core/tailwind.css'
-import '@styles/index.scss'
+import App from '@/App.vue'
+import { bootstrapRuntime } from '@/bootstrap-runtime'
+import { bffSession, signOut } from '@bff/api/bff'
+import { initRouter } from '@bff/router'
 
-const app = createApp(App)
-app.use(createPinia().use(piniaPluginPersistedstate))
-app.use(i18n)
-app.use(router)
-setupGlobDirectives(app)
-app.mount('#app')
+bootstrapRuntime({
+  rootComponent: App,
+  installRouter: initRouter,
+  manageSupabaseSession: false,
+  authContext: {
+    hasAuth: (permission) => bffSession.value?.permissions.includes(permission) ?? false,
+    hasRole: (role) => bffSession.value?.user.role === role,
+    account: {
+      user: () => bffSession.value?.user,
+      logout: async () => {
+        await signOut()
+        window.location.replace('/api/auth/login?force_login=1&returnTo=%2Fapplications')
+      }
+    }
+  }
+})

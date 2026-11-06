@@ -32,10 +32,10 @@
 </template>
 <script setup lang="tsx">
   import { ElButton, ElTag } from 'element-plus'
-  import { fetchApplications } from '@/api/bff'
+  import { fetchApplications } from '@bff/api/bff'
   import { useAuth } from '@/hooks/core/useAuth'
   import BusinessTableRowActions from '@/components/business/business-table-row-actions/index.vue'
-  import type { BffApplication } from '@/types/bff'
+  import type { BffApplication } from '@bff/types/bff'
   import type { ColumnOption } from '@/types'
   import type {
     ArtTableQueryExpose,

@@ -17,8 +17,8 @@
   /></ArtDialog>
 </template>
 <script setup lang="ts">
-  import { saveApplication, BffApiError } from '@/api/bff'
-  import type { ApplicationInput, BffApplication } from '@/types/bff'
+  import { saveApplication, BffApiError } from '@bff/api/bff'
+  import type { ApplicationInput, BffApplication } from '@bff/types/bff'
   import type { FormItem } from '@/components/core/forms/art-form/index.vue'
   import type { ArtDialogExpose } from '@/components/core/dialogs/art-dialog/types'
   import type ArtForm from '@/components/core/forms/art-form/index.vue'

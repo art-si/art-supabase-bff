@@ -1,12 +1,22 @@
 {
+  "extends": "./node_modules/art-supabase-pro/tsconfig.consumer.json",
   "compilerOptions": {
-    "target": "esnext", "module": "esnext", "moduleResolution": "bundler",
-    "strict": true, "jsx": "preserve", "jsxImportSource": "vue",
-    "resolveJsonModule": true, "esModuleInterop": true,
-    "lib": ["esnext", "dom"], "types": ["vite/client", "node", "element-plus/global"],
-    "skipLibCheck": true, "ignoreDeprecations": "6.0", "baseUrl": ".",
-    "paths": { "@/*": ["src/*"], "@views/*": ["src/views/*"], "@imgs/*": ["src/assets/images/*"], "@icons/*": ["src/assets/icons/*"], "@utils/*": ["src/utils/*"], "@stores/*": ["src/store/*"], "@plugins/*": ["src/plugins/*"], "@styles/*": ["src/assets/styles/*"] }
+    "baseUrl": ".",
+    "paths": {
+      "@bff/*": ["src/*"],
+      "@/router": ["src/router/index.ts"],
+      "@/router/index": ["src/router/index.ts"],
+      "@/*": ["node_modules/art-supabase-pro/src/*"],
+      "@views/*": ["node_modules/art-supabase-pro/src/views/*"],
+      "@styles/*": ["node_modules/art-supabase-pro/src/assets/styles/*"],
+      "@imgs/*": ["node_modules/art-supabase-pro/src/assets/images/*"],
+      "@utils/*": ["node_modules/art-supabase-pro/src/utils/*"],
+      "@stores/*": ["node_modules/art-supabase-pro/src/store/*"],
+      "@/router/core/platform-route-modules": [
+        "node_modules/art-supabase-pro/src/router/core/standalone-route-modules.ts"
+      ]
+    }
   },
   "include": ["src/**/*", "server/**/*.ts", "tests/**/*.ts", "vite.config.ts"],
-  "exclude": ["node_modules", "dist", "src/types/import/components.d.ts"]
+  "exclude": ["node_modules", "dist"]
 }
