@@ -1,3 +1,5 @@
+import { mkdirSync } from 'node:fs'
+import path from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
 import type {
   InterfaceBinding,
@@ -518,6 +520,11 @@ test('create, edit two steps, validate and test with invalid input and stale res
   await expect(testDialog.getByText('已完成两步测试')).toBeVisible()
   await expect(testDialog.getByText('ready')).toBeVisible()
   await expect(testDialog.getByText('总耗时 78 毫秒')).toBeVisible()
+  await expect(page.locator('.el-overlay-message-box')).toHaveCount(0)
+  await testDialog.getByText('ready').scrollIntoViewIfNeeded()
+  const screenshotPath = path.resolve('.artifacts/ui/interface-test-success.png')
+  mkdirSync(path.dirname(screenshotPath), { recursive: true })
+  await page.screenshot({ path: screenshotPath })
   expect(state.testRuns).toBe(2)
   expect(state.unexpected).toEqual([])
   expect(state.errors).toEqual([])
