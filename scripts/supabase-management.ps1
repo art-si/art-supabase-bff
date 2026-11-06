@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectBff','InspectMembers','VerifyBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember')][string]$Action = 'Inspect',
+  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -33,6 +33,19 @@ if (!$taskToken) { throw 'Authenticated Supabase CLI credential unavailable.' }
 $taskHeaders = @{ Authorization = "Bearer $taskToken" }
 $proRef = 'ckbftoopuyophiebamwy'
 $bffRef = 'bksbwnxdurmuolygiofh'
+if ($Action -eq 'InspectDesignReferences') {
+  # Read only: design preferences belong to pro; BFF schema operations remain scoped below.
+  $taskQuery = @'
+select jsonb_strip_nulls(jsonb_build_object(
+  'route', j->'route_path_pattern', 'title', j->'page_title', 'tags', j->'preference_tags',
+  'note', j->'note', 'style', j->'style_snapshot', 'updated_at', j->'update_time'
+)) as reference
+from (select to_jsonb(r) as j from public.ai_ui_design_reference r) source
+order by j->>'update_time' desc nulls last limit 60
+'@
+  Invoke-RestMethod -Method Post -Uri "https://api.supabase.com/v1/projects/$proRef/database/query" -Headers $taskHeaders -ContentType 'application/json' -Body (@{query=$taskQuery} | ConvertTo-Json -Compress) | ConvertTo-Json -Depth 15
+  exit
+}
 if ($Action -eq 'InspectConsent') {
   if (!$Login) { throw 'Provide the account email to inspect.' }
   $taskExpectedLogin = $Login.Trim().Replace("'", "''")
