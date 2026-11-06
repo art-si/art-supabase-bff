@@ -41,6 +41,11 @@ export const config = {
   sessionKey: env.BFF_SESSION_KEY || '',
   databaseUrl: env.BFF_SUPABASE_URL || '',
   databaseKey: env.BFF_SUPABASE_SERVICE_KEY || '',
+  credentialKeys: env.BFF_CREDENTIAL_KEYS || '{}',
+  credentialKeyId: env.BFF_CREDENTIAL_KEY_ID || 'v1',
+  upstreamAllowedOrigins: env.BFF_UPSTREAM_ALLOWED_ORIGINS || '',
+  upstreamAllowedCidrs: env.BFF_UPSTREAM_ALLOWED_CIDRS || '',
+  upstreamAllowLocalHttp: env.BFF_UPSTREAM_ALLOW_LOCAL_HTTP === 'true',
   production
 }
 

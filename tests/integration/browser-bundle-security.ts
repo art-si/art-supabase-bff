@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { config } from '../../server/config'
+import { credentialKeyring } from '../../server/upstream-credentials'
 
 const root = path.resolve('dist')
 const credentials = [config.clientSecret, config.sessionKey, config.databaseKey]
+credentials.push(...credentialKeyring(config.credentialKeys, config.credentialKeyId).keys.values())
 assert.ok(
   credentials.every((value) => value.length >= 16),
   'Configure real server credentials before checking the browser build'

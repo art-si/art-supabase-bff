@@ -1,6 +1,6 @@
 # art-supabase-bff
 
-基于 art-supabase-pro npm 主仓组件体系的 BFF 平台，已接入统一认证、应用管理、菜单、字典、角色与成员管理。
+基于 art-supabase-pro npm 主仓组件体系的 BFF 平台，已接入统一认证、应用管理、菜单、字典、角色、成员与上游服务管理。
 
 ## 边界
 
@@ -66,6 +66,16 @@ Windows 上可复用已登录的 Supabase CLI 凭据执行初始化工具，凭�
 - 停用成员会在同一事务中撤销其 BFF 会话、业务角色和应用授权；重新启用不会恢复这些授权。停用管理员前需明确核对其保留的平台身份。系统禁止自我停用、自我降级及移除最后一名有效管理员。
 - 编辑、授权和成员状态变更使用版本或打开时的授权快照；遇到冲突需重新加载，防止覆盖其他管理员的修改。
 
+## 上游服务
+
+通过 **服务管理 → 上游服务**，按应用和环境登记服务草稿，配置地址、超时和认证方式，维护凭据并执行连接检测。页面与弹窗继续复用 pro npm 的 ArtTableQuery、ArtForm、ArtDialog、主题和布局。
+
+- 服务编码、应用和环境创建后固定；配置编辑、凭据维护和启停使用版本校验。
+- `BFF_CREDENTIAL_KEYS` 是仅服务端使用的版本化密钥集合，值为 32 字节 Base64；`BFF_CREDENTIAL_KEY_ID` 指定当前写入版本。密钥必须独立于会话密钥；保留仍有记录使用的旧版本。凭据不回显，不进入浏览器存储或审计日志。
+- 配置 `BFF_UPSTREAM_ALLOWED_ORIGINS` 精确源站列表后，才能启用和检测相应地址。内网目标还需 `BFF_UPSTREAM_ALLOWED_CIDRS`；云元数据及链路本地地址仍禁止。生产始终使用 HTTPS，禁止本地 HTTP 放行。
+- 网络策略留空时，可先登记 HTTPS 草稿。连接检测不发送凭据、不跟随重定向，仅表示网络可达，不能作为业务认证通过的依据。
+- 删除前检查引用并停用服务；删除归档配置、移除凭据，保留不可变配置版本和操作审计。
+
 ## 验证
 
 ```powershell
@@ -79,7 +89,7 @@ node --use-env-proxy --import tsx tests/integration/http-security.ts
 
 浏览器回归和最后一项需要本地服务运行于 http://localhost:3012，可通过 BFF_TEST_ORIGIN 指定其他本机端口。浏览器回归只使用合成 API 数据，验证实际 npm 页面和动态路由；真实 API 检查使用右边数据库中的隔离测试租户，结束后清理所有测试记录。这两项都不能代替真实统一登录验收。
 
-代理环境运行本机 HTTP 联测时，先设置 `$env:NO_PROXY='localhost,127.0.0.1'`。数据库回滚验证包含 `control-plane-schema.sql`、`role-access.sql` 和 `application-authorization.sql`；仅执行 `ValidateBffSchema` 不提交结构变更。
+代理环境运行本机 HTTP 联测时，先设置 `$env:NO_PROXY='localhost,127.0.0.1'`。数据库回滚验证包含 `control-plane-schema.sql`、`role-access.sql`、`application-authorization.sql` 和 `upstream-schema.sql`；仅执行 `ValidateBffSchema` 不提交结构变更。
 
 成员页视觉数据可通过 `node --use-env-proxy --import tsx tests/integration/ui-fixtures.ts apply` 准备，并以同命令的 `remove` 清理。该工具只创建两条停用、无法匹配 pro 签发者的临时验收记录，不创建身份中心账号、不授予访问权限；验收后必须清理。
 

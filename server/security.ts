@@ -12,21 +12,23 @@ export function opaqueToken(): string {
 export function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
-export function seal(value: unknown, encodedKey: string): string {
+export function seal(value: unknown, encodedKey: string, additionalData?: string): string {
   const key = Buffer.from(encodedKey, 'base64')
   if (key.length !== 32) throw new Error('BFF_SESSION_KEY 必须为 32 字节的 Base64 编码')
   const iv = randomBytes(12)
   const cipher = createCipheriv('aes-256-gcm', key, iv)
+  if (additionalData !== undefined) cipher.setAAD(Buffer.from(additionalData, 'utf8'))
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()])
   return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url')
 }
-export function unseal(value: string, encodedKey: string): unknown {
+export function unseal(value: string, encodedKey: string, additionalData?: string): unknown {
   const bytes = Buffer.from(value, 'base64url')
   const decipher = createDecipheriv(
     'aes-256-gcm',
     Buffer.from(encodedKey, 'base64'),
     bytes.subarray(0, 12)
   )
+  if (additionalData !== undefined) decipher.setAAD(Buffer.from(additionalData, 'utf8'))
   decipher.setAuthTag(bytes.subarray(12, 28))
   return JSON.parse(
     Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8')

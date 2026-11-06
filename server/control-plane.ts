@@ -68,6 +68,7 @@ const menuComponents = new Set([
   '',
   '/index/index',
   '/bff/applications/index',
+  '/bff/upstreams/index',
   '/shared/system/menu',
   '/shared/system/role',
   '/bff/system/member/index',
@@ -257,6 +258,16 @@ export async function writeControl(
 export async function controlReferences(req: IncomingMessage, session: Session): Promise<unknown> {
   requireMutation(req, session)
   const input = await body(req, 65536)
+  if (input.table === 'bff_upstream_services') {
+    const ids = idsInput(input.ids)
+    if (ids.length !== 1) throw new HttpError(400, '请逐条检查上游服务的关联记录')
+    const result = await database.rpc('bff_upstream_references', {
+      p_actor: session.member.id,
+      p_id: ids[0]
+    })
+    controlFailure(result.error)
+    return result.data
+  }
   const resource =
     input.resourceType ??
     {
@@ -358,7 +369,8 @@ export async function tableColumnRuntime(session: Session, url: URL): Promise<un
     '/system/role': 'System:Role:View',
     '/system/member': 'System:Member:View',
     '/data-center/dict': 'DataCenter:Dict:View',
-    '/applications': 'BffApplication:View'
+    '/applications': 'BffApplication:View',
+    '/upstreams': 'BffUpstream:View'
   }
   const routePath = url.searchParams.get('routePath') || ''
   const permission = Object.hasOwn(routes, routePath) ? routes[routePath] : undefined

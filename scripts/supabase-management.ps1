@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember')][string]$Action = 'Inspect',
+  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -33,6 +33,12 @@ if (!$taskToken) { throw 'Authenticated Supabase CLI credential unavailable.' }
 $taskHeaders = @{ Authorization = "Bearer $taskToken" }
 $proRef = 'ckbftoopuyophiebamwy'
 $bffRef = 'bksbwnxdurmuolygiofh'
+function Read-Utf8JsonResponse($Response) {
+  # Windows PowerShell 5 may decode JSON without a response charset as Latin-1.
+  # Parse the original UTF-8 bytes so recovery snapshots preserve Chinese data.
+  $taskUtf8Json = [Text.Encoding]::UTF8.GetString($Response.RawContentStream.ToArray())
+  return (ConvertFrom-Json -InputObject $taskUtf8Json)
+}
 if ($Action -eq 'InspectDesignReferences') {
   # Read only: design preferences belong to pro; BFF schema operations remain scoped below.
   $taskQuery = @'
@@ -43,7 +49,8 @@ select jsonb_strip_nulls(jsonb_build_object(
 from (select to_jsonb(r) as j from public.ai_ui_design_reference r) source
 order by j->>'update_time' desc nulls last limit 60
 '@
-  Invoke-RestMethod -Method Post -Uri "https://api.supabase.com/v1/projects/$proRef/database/query" -Headers $taskHeaders -ContentType 'application/json' -Body (@{query=$taskQuery} | ConvertTo-Json -Compress) | ConvertTo-Json -Depth 15
+  $taskResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "https://api.supabase.com/v1/projects/$proRef/database/query" -Headers $taskHeaders -ContentType 'application/json' -Body (@{query=$taskQuery} | ConvertTo-Json -Compress)
+  Read-Utf8JsonResponse $taskResponse | ConvertTo-Json -Depth 15
   exit
 }
 if ($Action -eq 'InspectConsent') {
@@ -79,8 +86,111 @@ if ($Action -eq 'InspectAuthorization') {
 }
 function Invoke-BffQuery([string]$Query) {
   $taskBody = [Text.Encoding]::UTF8.GetBytes((@{query=$Query} | ConvertTo-Json -Compress))
-  $taskResult = Invoke-RestMethod -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json; charset=utf-8' -Body $taskBody
-  return $taskResult
+  $taskResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json; charset=utf-8' -Body $taskBody
+  return (Read-Utf8JsonResponse $taskResponse)
+}
+if ($Action -eq 'EnableUpstreamNavigation') {
+  if ([string]::IsNullOrWhiteSpace($Login)) { throw 'Provide the existing BFF administrator email.' }
+  if (!(Test-Path -LiteralPath 'src/views/upstreams/index.vue')) { throw 'Install and verify the upstream UI before enabling navigation.' }
+  $taskHealth = Invoke-RestMethod -Uri ($AppOrigin.TrimEnd('/') + '/api/health')
+  if ($taskHealth.status -ne 'ok' -or 'upstreams' -notin $taskHealth.capabilities) { throw 'The running BFF host does not declare the upstream capability.' }
+  $taskAccount = $Login.Trim().Replace("'", "''")
+  $taskEnableSql = @"
+begin;
+do `$`$
+declare actor public.bff_members; changed integer; page uuid;
+begin
+  if (select count(*) from public.bff_members where lower(email)=lower('$taskAccount') and enabled and role='admin'
+    and issuer='https://ckbftoopuyophiebamwy.supabase.co/auth/v1')<>1
+  then raise exception 'Exactly one active existing BFF administrator is required'; end if;
+  select * into actor from public.bff_members where lower(email)=lower('$taskAccount') and enabled and role='admin'
+    and issuer='https://ckbftoopuyophiebamwy.supabase.co/auth/v1';
+  perform public.bff_control_lock(actor.id,'System:Menu:Edit','menus');
+  if (select count(*) from public.bff_menus where tenant_id=actor.tenant_id and builtin and
+    ((name='BffServiceManagement' and path='/services' and type='folder') or
+     (name='BffUpstreams' and path='/upstreams' and component='/bff/upstreams/index' and type='menu')))<>2
+  then raise exception 'Reviewed upstream navigation entries are missing'; end if;
+  select id into page from public.bff_menus where tenant_id=actor.tenant_id and name='BffUpstreams';
+  if (select count(*) from public.bff_menus where tenant_id=actor.tenant_id and parent_id=page and builtin and type='button'
+    and name in ('BffUpstream:View','BffUpstream:Add','BffUpstream:Edit','BffUpstream:ChangeStatus','BffUpstream:Test','BffUpstream:RotateSecret','BffUpstream:Delete'))<>7
+  then raise exception 'Reviewed upstream permission entries are missing'; end if;
+  update public.bff_menus set meta=jsonb_set(meta,'{isEnable}','true'::jsonb),version=version+1,
+    update_by=actor.id,update_time=now() where tenant_id=actor.tenant_id and builtin
+    and (name in ('BffServiceManagement','BffUpstreams') or (parent_id=page and type='button' and
+      name in ('BffUpstream:View','BffUpstream:Add','BffUpstream:Edit','BffUpstream:ChangeStatus','BffUpstream:Test','BffUpstream:RotateSecret','BffUpstream:Delete')))
+    and meta->'isEnable' is distinct from 'true'::jsonb;
+  get diagnostics changed=row_count;
+  if changed>0 then perform public.bff_control_advance(actor.id,'menus','menu.capability.enable',page,
+    jsonb_build_object('capability','upstreams','changed',changed)); end if;
+end `$`$;
+commit;
+"@
+  $null = Invoke-BffQuery $taskEnableSql
+  Write-Output 'Upstream navigation enabled for the existing administrator tenant after host capability verification.'
+  exit
+}
+if ($Action -eq 'CleanupUpstreamFixtures') {
+  $taskManifestPath = Join-Path (Get-Location) '.artifacts/upstream-http-fixtures.json'
+  if (!(Test-Path -LiteralPath $taskManifestPath)) { Write-Output 'No upstream fixture manifest to clean.'; exit }
+  $taskManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskManifestPath | ConvertFrom-Json
+  $taskTenantIds = @($taskManifest.tenantIds)
+  $taskMemberIds = @($taskManifest.memberIds)
+  if ($taskTenantIds.Count -ne 2 -or $taskMemberIds.Count -lt 2 -or $taskMemberIds.Count -gt 10 -or
+    @($taskTenantIds | Select-Object -Unique).Count -ne 2 -or
+    @($taskMemberIds | Select-Object -Unique).Count -ne $taskMemberIds.Count) { throw 'Invalid isolated fixture manifest.' }
+  foreach ($taskId in @($taskTenantIds + $taskMemberIds)) {
+    if ([string]$taskId -notmatch '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') { throw 'Fixture identifiers must be UUIDs.' }
+  }
+  $taskTenantSql = 'array[' + (($taskTenantIds | ForEach-Object { "'$([guid]$_)'::uuid" }) -join ',') + ']'
+  $taskMemberSql = 'array[' + (($taskMemberIds | ForEach-Object { "'$([guid]$_)'::uuid" }) -join ',') + ']'
+  $taskCleanupSql = @"
+begin;
+set constraints all deferred;
+do `$`$
+declare tenants uuid[]:=$taskTenantSql; members uuid[]:=$taskMemberSql; tenant uuid;
+begin
+  foreach tenant in array tenants loop
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||tenant::text,0));
+  end loop;
+  if exists(select 1 from public.bff_members m where m.tenant_id=any(tenants) and
+    (not(m.id=any(members)) or m.subject<>'bff-upstream-fixture:'||m.id::text or m.email not like '%@example.test')) or
+    exists(select 1 from public.bff_members m where m.id=any(members) and not(m.tenant_id=any(tenants))) or
+    exists(select 1 from public.bff_applications a where a.tenant_id=any(tenants) and not(a.created_by=any(members)))
+  then raise exception 'Refusing cleanup: namespace contains non-fixture records'; end if;
+end `$`$;
+-- Owner maintenance only: the transaction lock prevents concurrent snapshot writes.
+-- The runtime role retains no ability to bypass the immutable revision trigger.
+lock table public.bff_upstream_service_revisions in share row exclusive mode;
+alter table public.bff_upstream_service_revisions disable trigger bff_upstream_revision_guard;
+delete from public.bff_sessions where member_id=any($taskMemberSql);
+delete from public.bff_audit_events where tenant_id=any($taskTenantSql);
+delete from public.bff_upstream_credentials where tenant_id=any($taskTenantSql);
+delete from public.bff_upstream_service_revisions where tenant_id=any($taskTenantSql);
+alter table public.bff_upstream_service_revisions enable trigger bff_upstream_revision_guard;
+delete from public.bff_upstream_services where tenant_id=any($taskTenantSql);
+delete from public.bff_role_menus where tenant_id=any($taskTenantSql);
+delete from public.bff_member_roles where tenant_id=any($taskTenantSql);
+delete from public.bff_roles where tenant_id=any($taskTenantSql);
+delete from public.bff_menus where tenant_id=any($taskTenantSql);
+delete from public.bff_dictionary_items where tenant_id=any($taskTenantSql);
+delete from public.bff_dictionary_types where tenant_id=any($taskTenantSql);
+delete from public.bff_application_members where tenant_id=any($taskTenantSql);
+delete from public.bff_applications where tenant_id=any($taskTenantSql);
+delete from public.bff_resource_revisions where tenant_id=any($taskTenantSql);
+update public.bff_members set updated_by=null where tenant_id=any($taskTenantSql);
+delete from public.bff_members where tenant_id=any($taskTenantSql);
+set constraints all immediate;
+do `$`$ begin
+  if exists(select 1 from public.bff_members where tenant_id=any($taskTenantSql)) or
+    exists(select 1 from pg_trigger where tgrelid='public.bff_upstream_service_revisions'::regclass and tgname='bff_upstream_revision_guard' and tgenabled<>'O')
+  then raise exception 'Fixture cleanup verification failed'; end if;
+end `$`$;
+commit;
+"@
+  $null = Invoke-BffQuery $taskCleanupSql
+  Remove-Item -LiteralPath $taskManifestPath
+  Write-Output 'Isolated upstream fixtures removed; immutable snapshot guard verified enabled.'
+  exit
 }
 if ($Action -in @('ValidateBffSchema','ApplyCanonicalBff')) {
   $taskSql = Get-Content -Raw -Encoding UTF8 -LiteralPath 'server/database/schema.sql'
@@ -144,7 +254,7 @@ select jsonb_build_object(
     if (@($taskBackup.tables.$taskName).Count -ne [int]$taskDatabaseSnapshot.rowCounts.$taskName) { throw 'BFF recovery row counts do not match.' }
   }
   $taskVerification = ''
-  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql')) {
+  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql')) {
     if (Test-Path -LiteralPath $taskVerificationPath) {
       $taskVerificationPart = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskVerificationPath
       if ($taskVerificationPart -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }

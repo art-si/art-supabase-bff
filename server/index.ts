@@ -24,6 +24,14 @@ import {
 } from './control-plane'
 import { database } from './database/client'
 import { readRoles, writeRole, roleAssignments, readMembers, writeMember } from './access-control'
+import {
+  listUpstreams,
+  upstreamOptions,
+  saveUpstream,
+  changeUpstream,
+  testUpstream,
+  upstreamReferences
+} from './upstreams'
 import TreeUtils from 'art-supabase-pro/src/utils/tree.ts'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 
@@ -37,7 +45,11 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
   res.setHeader('X-Frame-Options', 'DENY')
   try {
     if (url.pathname === '/api/health' && req.method === 'GET') {
-      json(res, { status: 'ok', authenticationConfigured: authReady() })
+      json(res, {
+        status: 'ok',
+        authenticationConfigured: authReady(),
+        capabilities: ['upstreams']
+      })
       return
     }
     if (url.pathname === '/api/auth/login' && req.method === 'GET') {
@@ -87,6 +99,51 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     if (url.pathname === '/api/control/menus' && req.method === 'GET') {
       json(res, await readMenus(session, url.searchParams.get('catalog') === '1'))
       return
+    }
+    if (url.pathname === '/api/upstreams/options' && req.method === 'GET') {
+      json(res, await upstreamOptions(session))
+      return
+    }
+    if (url.pathname === '/api/upstreams') {
+      if (req.method === 'GET') {
+        json(res, await listUpstreams(session, url))
+        return
+      }
+      if (req.method === 'POST') {
+        json(res, await saveUpstream(req, session), 201)
+        return
+      }
+    }
+    const upstreamResource =
+      /^\/api\/upstreams\/([^/]+)(?:\/(status|credential|health-tests|references))?$/.exec(
+        url.pathname
+      )
+    if (upstreamResource) {
+      const [, id, operation] = upstreamResource
+      if (!operation && req.method === 'PUT') {
+        json(res, await saveUpstream(req, session, id))
+        return
+      }
+      if (!operation && req.method === 'DELETE') {
+        json(res, await changeUpstream(req, session, id, 'delete'))
+        return
+      }
+      if (operation === 'status' && req.method === 'POST') {
+        json(res, await changeUpstream(req, session, id, 'status'))
+        return
+      }
+      if (operation === 'credential' && req.method === 'PUT') {
+        json(res, await changeUpstream(req, session, id, 'credential'))
+        return
+      }
+      if (operation === 'health-tests' && req.method === 'POST') {
+        json(res, await testUpstream(req, session, id))
+        return
+      }
+      if (operation === 'references' && req.method === 'GET') {
+        json(res, await upstreamReferences(session, id))
+        return
+      }
     }
     if (url.pathname === '/api/control/roles' && (req.method === 'GET' || req.method === 'POST')) {
       json(res, req.method === 'GET' ? await readRoles(session) : await writeRole(req, session))
