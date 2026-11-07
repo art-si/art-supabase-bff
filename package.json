@@ -8,7 +8,7 @@
     "pnpm": ">=11.28.2"
   },
   "scripts": {
-    "dev": "node --env-file-if-exists=.env.local --watch --watch-path=server --watch-path=vite.config.ts --use-env-proxy --import tsx server/index.ts",
+    "dev": "node node_modules/tsx/dist/cli.mjs watch --clear-screen=false --include vite.config.ts --include .env.local --exclude src/views/** --exclude src/api/** --exclude src/router/** --exclude src/main.ts --exclude docs/** --exclude .artifacts/** --env-file-if-exists=.env.local --use-env-proxy server/index.ts",
     "build": "vite build",
     "start": "node --use-env-proxy --import tsx server/index.ts --production",
     "typecheck": "npm run typecheck:server && npm run typecheck:client",
