@@ -23,19 +23,32 @@ test('session bootstrap failure restarts OAuth with the original local destinati
 
 test('a persistent bootstrap failure cannot create an OAuth redirect loop', async ({ page }) => {
   let restarts = 0
+  let recovery: URL | undefined
   await page.route('**/api/auth/session', (route) => route.abort('failed'))
   await page.route('**/api/auth/login?**', async (route) => {
     restarts++
-    const resume = new URL(route.request().url()).searchParams.get('returnTo')
+    const request = new URL(route.request().url())
+    if (request.searchParams.get('reason') === 'service_unavailable') {
+      recovery = request
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: '<!doctype html><title>Common identity login</title><p>Shared identity login recovery</p>'
+      })
+      return
+    }
+    const resume = request.searchParams.get('returnTo')
     await route.fulfill({ status: 303, headers: { location: resume || '/applications' } })
   })
   await page.goto('/applications?name=orders')
-  await expect(page.getByText('统一登录暂时不可用，请稍后重试。', { exact: true })).toBeVisible()
-  expect(restarts).toBe(1)
-  expect(new URL(page.url()).searchParams.get('returnTo')).toBe('/applications?name=orders')
+  await expect(page.getByText('Shared identity login recovery', { exact: true })).toBeVisible()
+  expect(restarts).toBe(2)
+  expect(recovery?.searchParams.get('returnTo')).toBe('/applications?name=orders')
+  expect(recovery?.searchParams.get('force_login')).toBe('1')
+  await expect(page.getByText('登录未完成', { exact: true })).toHaveCount(0)
 })
 
-test('old transient login URL restarts once while terminal login failure stays visible', async ({
+test('all legacy local login pages redirect without rendering a BFF login card', async ({
   request
 }) => {
   const transient = await request.get(
@@ -51,6 +64,8 @@ test('old transient login URL restarts once while terminal login failure stays v
   const terminal = await request.get('/auth/login?error=login_unavailable', {
     maxRedirects: 0
   })
-  expect(terminal.status()).toBe(200)
-  expect(terminal.headers().location).toBeUndefined()
+  expect(terminal.status()).toBe(303)
+  const next = new URL(terminal.headers().location, 'http://localhost')
+  expect(next.pathname).toBe('/api/auth/login')
+  expect(next.searchParams.get('restart')).toBe('1')
 })

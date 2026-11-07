@@ -116,4 +116,14 @@ tests/fixtures/ui-server.ts 仅供界面测试，提供内存中的虚构数据�
 
 公共源码旧副本已移至忽略目录 `.artifacts/framework-source-backup`，不参与运行、构建或提交。移出前已保存 Git 基线；工程内不再维护这些公共副本。
 
-详见 docs/architecture.md。
+详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+## 系统配置
+
+通过 **系统管理 → 系统配置** 维护系统名称、简称、说明、Logo、浏览器图标和水印，默认名称为“BFF平台”。图片支持 HTTPS 地址或本站相对路径，留空恢复公共默认图标。
+
+页面直接复用 pro npm 包的品牌配置模式。BFF 只保留配置数据接口、并发版本校验及 `BffBrand:View` / `BffBrand:Edit` 权限。保存后共享侧栏、标题、图标和水印立即同步；其他会话重新加载后取得新配置。并发冲突保留当前输入，由操作者确认重新加载。
+
+BFF 品牌配置按当前租户保存，不修改 pro 的网站设置、账号、注册或登录策略。身份认证始终使用 pro 的同一登录表单，BFF 不再提供本地登录卡片。
+
+构建默认输出到 `docs/`，生产服务与产物检查读取同一目录；可通过 `VITE_OUT_DIR` 调整。架构文档保留在根目录 `ARCHITECTURE.md`，不参与构建清空。

@@ -72,6 +72,7 @@ const menuComponents = new Set([
   '/bff/interfaces/index',
   '/shared/system/menu',
   '/shared/system/role',
+  '/shared/system/website-config',
   '/bff/system/member/index',
   '/shared/data-center/dict'
 ])

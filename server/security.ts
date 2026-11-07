@@ -57,43 +57,29 @@ export function safeReturnPath(value: string | null): string {
   }
 }
 
-/** Accept only the configured consent UI and an opaque Auth-server request ID. */
-export function resolveAuthorizationUiRedirect(location: string, expected: string): string {
-  const target = new URL(location)
-  const allowed = new URL(expected)
-  const [route, query = ''] = target.hash.split('?')
-  const requestId = new URLSearchParams(query).get('authorization_id')
-  if (
-    target.protocol !== 'https:' ||
-    target.username ||
-    target.password ||
-    target.origin !== allowed.origin ||
-    target.pathname !== allowed.pathname ||
-    target.search !== allowed.search ||
-    route !== allowed.hash ||
-    !requestId ||
-    !/^[A-Za-z0-9_-]{1,512}$/.test(requestId)
-  )
-    throw new Error('统一授权入口返回了无效地址')
-  return target.href
-}
-
-/** Preserve the validated Auth request while opening the unified login form. */
+/** Open the configured common login; Auth still validates the client's callback allowlist. */
 export function resolveAuthorizationLoginRedirect(
-  location: string,
+  authorizationUrl: URL,
   expected: string,
   forceLogin = false,
   reason = ''
 ): string {
-  const target = new URL(resolveAuthorizationUiRedirect(location, expected))
-  const authorizationId = new URLSearchParams(target.hash.split('?')[1]).get('authorization_id')!
-  const resume = new URLSearchParams({ sso_authorization_id: authorizationId })
-  const query = new URLSearchParams({
-    sso_authorization_id: authorizationId,
-    redirect: `/auth/login?${resume}`
-  })
+  const target = new URL(expected)
+  if (
+    target.protocol !== 'https:' ||
+    target.username ||
+    target.password ||
+    target.hash !== '#/auth/oauth-consent'
+  )
+    throw new Error('统一登录入口配置无效')
+  const query = new URLSearchParams({ sso_authorize: authorizationUrl.href })
   if (forceLogin) query.set('sso_force', '1')
-  if (reason === 'access_denied') query.set('sso_error', reason)
+  if (
+    ['access_denied', 'service_unavailable', 'login_failed', 'authorization_cancelled'].includes(
+      reason
+    )
+  )
+    query.set('sso_error', reason)
   // Hash routes do not change the HTML cache key. Use a public cache key so a
   // cached pre-SSO login bundle cannot discard this application's request.
   target.searchParams.set('_auth_ui', Date.now().toString(36))

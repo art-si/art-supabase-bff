@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation')][string]$Action = 'Inspect',
+  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -89,21 +89,37 @@ function Invoke-BffQuery([string]$Query) {
   $taskResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json; charset=utf-8' -Body $taskBody
   return (Read-Utf8JsonResponse $taskResponse)
 }
-if ($Action -in @('EnableUpstreamNavigation','EnableInterfaceNavigation')) {
+if ($Action -in @('EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation')) {
   if ([string]::IsNullOrWhiteSpace($Login)) { throw 'Provide the existing BFF administrator email.' }
-  $taskCapability = if ($Action -eq 'EnableInterfaceNavigation') { 'interfaces' } else { 'upstreams' }
-  $taskPageName = if ($taskCapability -eq 'interfaces') { 'BffInterfaces' } else { 'BffUpstreams' }
-  $taskPermissionPrefix = if ($taskCapability -eq 'interfaces') { 'BffInterface' } else { 'BffUpstream' }
-  $taskActions = if ($taskCapability -eq 'interfaces') { @('View','Add','Edit','Validate','Test','TestWrite','Delete') } else { @('View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete') }
+  $taskCapability = switch ($Action) { { $_ -in @('EnableReleaseNavigation','DisableReleaseNavigation') } { 'releases' }; { $_ -in @('EnableBrandingNavigation','DisableBrandingNavigation') } { 'branding' }; 'EnableInterfaceNavigation' { 'interfaces' }; default { 'upstreams' } }
+  $taskNavigationValue = if ($Action.StartsWith('Disable')) { 'false' } else { 'true' }
+  $taskPageName = switch ($taskCapability) { 'branding' { 'BffBranding' }; 'releases' { 'BffReleases' }; 'interfaces' { 'BffInterfaces' }; default { 'BffUpstreams' } }
+  $taskPermissionPrefix = switch ($taskCapability) { 'branding' { 'BffBrand' }; 'releases' { 'BffRelease' }; 'interfaces' { 'BffInterface' }; default { 'BffUpstream' } }
+  $taskActions = switch ($taskCapability) { 'branding' { @('View','Edit') }; 'releases' { @('View','Publish','Rollback','ChangeStatus') }; 'interfaces' { @('View','Add','Edit','Validate','Test','TestWrite','Delete') }; default { @('View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete') } }
+  $taskParentName = if ($taskCapability -eq 'branding') { 'BffSystem' } else { 'BffServiceManagement' }
+  $taskParentPath = if ($taskCapability -eq 'branding') { '/system' } else { '/services' }
+  $taskPagePath = if ($taskCapability -eq 'branding') { '/system/website-config' } else { "/$taskCapability" }
+  $taskComponent = if ($taskCapability -eq 'branding') { '/shared/system/website-config' } else { "/bff/$taskCapability/index" }
   $taskPermissionSql = ($taskActions | ForEach-Object { "'$($taskPermissionPrefix):$_'" }) -join ','
-  if (!(Test-Path -LiteralPath "src/views/$taskCapability/index.vue")) { throw 'Install and verify the capability UI before enabling navigation.' }
+  $taskUiPath = if ($taskCapability -eq 'branding') { 'node_modules/art-supabase-pro/src/views/system/website-config/index.vue' } else { "src/views/$taskCapability/index.vue" }
+  if (!(Test-Path -LiteralPath $taskUiPath)) { throw 'Install and verify the capability UI before enabling navigation.' }
   $taskHealth = Invoke-RestMethod -Uri ($AppOrigin.TrimEnd('/') + '/api/health')
-  if ($taskHealth.status -ne 'ok' -or $taskCapability -notin $taskHealth.capabilities) { throw 'The running BFF host does not declare this capability.' }
+  if ($taskHealth.status -ne 'ok' -or ($taskNavigationValue -eq 'true' -and $taskCapability -notin $taskHealth.capabilities)) { throw 'The running BFF host does not declare this capability.' }
   $taskAccount = $Login.Trim().Replace("'", "''")
+  $taskGatewayPermissions = if ($taskCapability -eq 'releases') { @"
+  if (select count(*) from public.bff_menus m join public.bff_menus p on p.id=m.parent_id
+    where m.tenant_id=actor.tenant_id and m.builtin and m.type='button' and p.name='BffInterfaces'
+    and m.name in ('BffInterface:Invoke','BffInterface:InvokeWrite'))<>2
+  then raise exception 'Reviewed gateway permission entries are missing'; end if;
+  update public.bff_menus set meta=jsonb_set(meta,'{isEnable}','$taskNavigationValue'::jsonb),version=version+1,
+    update_by=actor.id,update_time=now() where tenant_id=actor.tenant_id and builtin and type='button'
+    and name in ('BffInterface:Invoke','BffInterface:InvokeWrite') and meta->'isEnable' is distinct from '$taskNavigationValue'::jsonb;
+  get diagnostics gateway_changed=row_count;
+"@ } else { '' }
   $taskEnableSql = @"
 begin;
 do `$`$
-declare actor public.bff_members; changed integer; page uuid;
+declare actor public.bff_members; changed integer; gateway_changed integer:=0; page uuid;
 begin
   if (select count(*) from public.bff_members where lower(email)=lower('$taskAccount') and enabled and role='admin'
     and issuer='https://ckbftoopuyophiebamwy.supabase.co/auth/v1')<>1
@@ -112,26 +128,28 @@ begin
     and issuer='https://ckbftoopuyophiebamwy.supabase.co/auth/v1';
   perform public.bff_control_lock(actor.id,'System:Menu:Edit','menus');
   if (select count(*) from public.bff_menus where tenant_id=actor.tenant_id and builtin and
-    ((name='BffServiceManagement' and path='/services' and type='folder') or
-     (name='$taskPageName' and path='/$taskCapability' and component='/bff/$taskCapability/index' and type='menu')))<>2
+    ((name='$taskParentName' and path='$taskParentPath' and type='folder') or
+     (name='$taskPageName' and path='$taskPagePath' and component='$taskComponent' and type='menu')))<>2
   then raise exception 'Reviewed navigation entries are missing'; end if;
   select id into page from public.bff_menus where tenant_id=actor.tenant_id and name='$taskPageName';
   if (select count(*) from public.bff_menus where tenant_id=actor.tenant_id and parent_id=page and builtin and type='button'
     and name in ($taskPermissionSql))<>$($taskActions.Count)
   then raise exception 'Reviewed permission entries are missing'; end if;
-  update public.bff_menus set meta=jsonb_set(meta,'{isEnable}','true'::jsonb),version=version+1,
+  update public.bff_menus set meta=jsonb_set(meta,'{isEnable}','$taskNavigationValue'::jsonb),version=version+1,
     update_by=actor.id,update_time=now() where tenant_id=actor.tenant_id and builtin
-    and (name in ('BffServiceManagement','$taskPageName') or (parent_id=page and type='button' and
+    and (name='$taskPageName' or (name='$taskParentName' and '$taskNavigationValue'='true') or (parent_id=page and type='button' and
       name in ($taskPermissionSql)))
-    and meta->'isEnable' is distinct from 'true'::jsonb;
+    and meta->'isEnable' is distinct from '$taskNavigationValue'::jsonb;
   get diagnostics changed=row_count;
+  $taskGatewayPermissions
+  changed:=changed+gateway_changed;
   if changed>0 then perform public.bff_control_advance(actor.id,'menus','menu.capability.enable',page,
-    jsonb_build_object('capability','$taskCapability','changed',changed)); end if;
+    jsonb_build_object('capability','$taskCapability','enabled','$taskNavigationValue'::boolean,'changed',changed)); end if;
 end `$`$;
 commit;
 "@
   $null = Invoke-BffQuery $taskEnableSql
-  Write-Output 'Reviewed navigation enabled for the existing administrator tenant after host capability verification.'
+  Write-Output "Reviewed navigation state set to $taskNavigationValue for the existing administrator tenant."
   exit
 }
 if ($Action -eq 'CleanupUpstreamFixtures') {
@@ -167,13 +185,22 @@ end `$`$;
 -- The runtime role retains no ability to bypass the immutable revision trigger.
 lock table public.bff_upstream_service_revisions in share row exclusive mode;
 alter table public.bff_upstream_service_revisions disable trigger bff_upstream_revision_guard;
+lock table public.bff_interface_versions,public.bff_interface_version_upstreams,public.bff_interface_release_events in share row exclusive mode;
+alter table public.bff_interface_versions disable trigger bff_interface_versions_immutable;
+alter table public.bff_interface_version_upstreams disable trigger bff_interface_version_upstreams_immutable;
+alter table public.bff_interface_release_events disable trigger bff_interface_release_events_immutable;
 delete from public.bff_sessions where member_id=any($taskMemberSql);
+delete from public.bff_platform_settings where tenant_id=any($taskTenantSql);
 delete from public.bff_audit_events where tenant_id=any($taskTenantSql);
+delete from public.bff_interface_calls where tenant_id=any($taskTenantSql);
+delete from public.bff_interface_release_events where tenant_id=any($taskTenantSql);
+delete from public.bff_interface_deployments where tenant_id=any($taskTenantSql);
+delete from public.bff_interface_version_upstreams where tenant_id=any($taskTenantSql);
+delete from public.bff_interface_versions where tenant_id=any($taskTenantSql);
 delete from public.bff_interface_upstreams where tenant_id=any($taskTenantSql);
 delete from public.bff_interfaces where tenant_id=any($taskTenantSql);
 delete from public.bff_upstream_credentials where tenant_id=any($taskTenantSql);
 delete from public.bff_upstream_service_revisions where tenant_id=any($taskTenantSql);
-alter table public.bff_upstream_service_revisions enable trigger bff_upstream_revision_guard;
 delete from public.bff_upstream_services where tenant_id=any($taskTenantSql);
 delete from public.bff_role_menus where tenant_id=any($taskTenantSql);
 delete from public.bff_member_roles where tenant_id=any($taskTenantSql);
@@ -187,9 +214,17 @@ delete from public.bff_resource_revisions where tenant_id=any($taskTenantSql);
 update public.bff_members set updated_by=null where tenant_id=any($taskTenantSql);
 delete from public.bff_members where tenant_id=any($taskTenantSql);
 set constraints all immediate;
+alter table public.bff_interface_versions enable trigger bff_interface_versions_immutable;
+alter table public.bff_interface_version_upstreams enable trigger bff_interface_version_upstreams_immutable;
+alter table public.bff_interface_release_events enable trigger bff_interface_release_events_immutable;
+alter table public.bff_upstream_service_revisions enable trigger bff_upstream_revision_guard;
 do `$`$ begin
   if exists(select 1 from public.bff_members where tenant_id=any($taskTenantSql)) or
-    exists(select 1 from pg_trigger where tgrelid='public.bff_upstream_service_revisions'::regclass and tgname='bff_upstream_revision_guard' and tgenabled<>'O')
+    exists(select 1 from pg_trigger where (tgrelid,tgname) in (
+      ('public.bff_upstream_service_revisions'::regclass,'bff_upstream_revision_guard'),
+      ('public.bff_interface_versions'::regclass,'bff_interface_versions_immutable'),
+      ('public.bff_interface_version_upstreams'::regclass,'bff_interface_version_upstreams_immutable'),
+      ('public.bff_interface_release_events'::regclass,'bff_interface_release_events_immutable')) and tgenabled<>'O')
   then raise exception 'Fixture cleanup verification failed'; end if;
 end `$`$;
 commit;
@@ -261,7 +296,7 @@ select jsonb_build_object(
     if (@($taskBackup.tables.$taskName).Count -ne [int]$taskDatabaseSnapshot.rowCounts.$taskName) { throw 'BFF recovery row counts do not match.' }
   }
   $taskVerification = ''
-  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql')) {
+  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql','tests/integration/release-schema.sql','tests/integration/branding-schema.sql')) {
     if (Test-Path -LiteralPath $taskVerificationPath) {
       $taskVerificationPart = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskVerificationPath
       if ($taskVerificationPart -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }
@@ -308,7 +343,16 @@ if ($Action -eq 'ProvisionMember') {
 }
 if ($Action -in @('InspectBff','ApplyBffSchema')) {
   $taskBaseline = Invoke-BffQuery "select tablename from pg_tables where schemaname='public' order by tablename"
-  if ($Action -eq 'InspectBff') { @{ project=$bffRef; tables=$taskBaseline } | ConvertTo-Json -Depth 5; exit }
+  if ($Action -eq 'InspectBff') {
+    $taskReleaseContract = Invoke-BffQuery @'
+select to_regclass('public.bff_interface_versions') is not null as releases_installed,
+  coalesce(position('when p_operation=''rollback'' then enabled else true end' in pg_get_functiondef(to_regprocedure(
+    'public.bff_write_release(uuid,text,uuid,integer,integer,uuid,text,jsonb)')))>0,false) as rollback_preserves_status,
+  to_regclass('public.bff_interface_calls_tenant_time_idx') is not null as gateway_tenant_quota_index
+'@
+    @{ project=$bffRef; tables=$taskBaseline; releaseContract=$taskReleaseContract } | ConvertTo-Json -Depth 5
+    exit
+  }
   if ($taskBaseline.Count -ne 0) { throw 'BFF schema bootstrap requires an empty public schema; inspect and back up existing data before further changes.' }
   New-Item -ItemType Directory -Path '.artifacts/database' -Force | Out-Null
   $taskSnapshotPath = Join-Path (Get-Location) '.artifacts/database/bff-before-bootstrap.json'

@@ -2,6 +2,7 @@
 import { createServer } from 'node:http'
 import { createReadStream, existsSync } from 'node:fs'
 import path from 'node:path'
+import { config } from '../../server/config'
 import type { ApplicationInput, BffApplication, BffSession } from '../../src/types/bff'
 
 const administrator = '11111111-1111-4111-8111-111111111111'
@@ -44,7 +45,7 @@ let rows: BffApplication[] = [
   }
 ]
 let granted = false
-const root = path.resolve('dist')
+const root = path.resolve(config.browserOutputDir)
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://localhost:3020')
   const reply = (value: unknown, status = 200): void => {

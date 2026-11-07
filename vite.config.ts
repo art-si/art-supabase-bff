@@ -18,6 +18,7 @@ if (process.argv.includes('--typecheck')) {
 
 export default defineConfig(async ({ mode }) => {
   const bffEnv = loadEnv(mode, applicationRoot, 'BFF_')
+  const viteEnv = loadEnv(mode, applicationRoot, 'VITE_')
   const { createModuleViteConfig } = await import(
     pathToFileURL(path.join(platformRoot, 'scripts/module-vite-config.mjs')).href
   )
@@ -32,6 +33,10 @@ export default defineConfig(async ({ mode }) => {
   })
   const aliases = config.resolve?.alias as Record<string, string>
   const alias: AliasOptions = [
+    {
+      find: /^@\/api\/system-manage\/website-config$/,
+      replacement: path.join(applicationRoot, 'src/api/website-config.ts')
+    },
     ...[
       'system-manage',
       'data-center',
@@ -56,6 +61,6 @@ export default defineConfig(async ({ mode }) => {
       exclude: [...(config.optimizeDeps?.exclude ?? []), 'art-supabase-pro']
     },
     resolve: { ...config.resolve, alias },
-    build: { ...config.build, outDir: 'dist' }
+    build: { ...config.build, outDir: process.env.VITE_OUT_DIR || viteEnv.VITE_OUT_DIR || 'docs' }
   }
 })

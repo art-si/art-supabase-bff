@@ -4,7 +4,6 @@ import { randomBytes } from 'node:crypto'
 import {
   digest,
   opaqueToken,
-  resolveAuthorizationUiRedirect,
   resolveAuthorizationLoginRedirect,
   safeEqual,
   safeReturnPath,
@@ -50,48 +49,27 @@ test('return paths cannot become external or backslash-based redirects', () => {
   assert.equal(safeEqual('a', 'a'), true)
 })
 
-test('first-party entry opens only the configured login form and retains the opaque request', () => {
+test('first-party login retains the Auth request and only opens the configured common UI', () => {
+  const authorization = new URL('https://auth.example/auth/v1/oauth/authorize?state=opaque')
   const consent = 'https://identity.example/pro/#/auth/oauth-consent'
   const login = new URL(
-    resolveAuthorizationLoginRedirect(
-      `${consent}?authorization_id=test_request`,
-      consent,
-      true,
-      'access_denied'
-    )
+    resolveAuthorizationLoginRedirect(authorization, consent, true, 'access_denied')
   )
   assert.equal(login.origin, 'https://identity.example')
-  assert.equal(login.pathname, '/pro/')
-  assert.match(login.searchParams.get('_auth_ui') || '', /^[a-z0-9]+$/)
   assert.equal(login.hash.split('?')[0], '#/auth/login')
   const query = new URLSearchParams(login.hash.split('?')[1])
-  assert.equal(query.get('sso_authorization_id'), 'test_request')
+  assert.equal(query.get('sso_authorize'), authorization.href)
   assert.equal(query.get('sso_force'), '1')
   assert.equal(query.get('sso_error'), 'access_denied')
-  assert.equal(query.get('redirect'), '/auth/login?sso_authorization_id=test_request')
-  assert.throws(() =>
-    resolveAuthorizationLoginRedirect(
-      'https://evil.example/#/auth/oauth-consent?authorization_id=test',
-      consent
-    )
-  )
+  assert.equal(query.has('redirect'), false)
+  for (const invalid of [
+    'http://identity.example/#/auth/oauth-consent',
+    'https://user:secret@identity.example/#/auth/oauth-consent',
+    'https://identity.example/#/other'
+  ])
+    assert.throws(() => resolveAuthorizationLoginRedirect(authorization, invalid))
 })
 
-test('the server-resolved authorization redirect is bound to the configured pro consent UI', () => {
-  const base = 'https://identity.example/pro/#/auth/oauth-consent'
-  assert.equal(
-    resolveAuthorizationUiRedirect(`${base}?authorization_id=opaque-request_123`, base),
-    `${base}?authorization_id=opaque-request_123`
-  )
-  for (const location of [
-    'https://evil.example/pro/#/auth/oauth-consent?authorization_id=test',
-    'https://identity.example/other/#/auth/oauth-consent?authorization_id=test',
-    'https://identity.example/pro/#/auth/login?authorization_id=test',
-    base,
-    'https://user:secret@identity.example/pro/#/auth/oauth-consent?authorization_id=test'
-  ])
-    assert.throws(() => resolveAuthorizationUiRedirect(location, base))
-})
 test('application writes reject executable URLs, credential-bearing URLs and malformed state', () => {
   const valid = {
     code: 'sample-app',
