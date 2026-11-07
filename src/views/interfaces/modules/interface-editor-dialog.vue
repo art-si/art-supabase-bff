@@ -1,5 +1,10 @@
 <template>
-  <ArtDialog ref="dialogRef" :loading="saving" @closed="resetAfterClose">
+  <ArtDialog
+    ref="dialogRef"
+    :loading="saving"
+    :confirm-disabled="optionsPending || Boolean(optionsLoadError)"
+    @closed="resetAfterClose"
+  >
     <div class="grid min-w-0 gap-4">
       <ArtEntitySummary
         compact
@@ -10,6 +15,21 @@
             ? `${record.application.name} · ${record.code}`
             : '定义输入、上游调用顺序与可公开的输出字段。'
         "
+      />
+      <ElAlert
+        v-if="optionsPending"
+        title="正在加载应用与上游选项，当前草稿可先查看。"
+        type="info"
+        :closable="false"
+        show-icon
+      />
+      <ElAlert
+        v-else-if="optionsLoadError"
+        :title="optionsLoadError"
+        description="请关闭弹窗后重试，选项就绪前不会提交草稿。"
+        type="warning"
+        :closable="false"
+        show-icon
       />
       <ElAlert
         title="草稿不会对外提供访问入口；请先验证定义，再在受控环境中测试。测试会真实请求上游服务。"
@@ -211,6 +231,8 @@
   const options = shallowRef<InterfaceOptions>()
   const activeTab = ref('basic')
   const saving = ref(false)
+  const optionsPending = ref(false)
+  const optionsLoadError = ref('')
   const saveError = ref('')
   const methods: InterfaceMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
   const upstreamStatusText = { draft: '草稿', active: '已启用', disabled: '已停用' } as const
@@ -623,7 +645,7 @@
   }
 
   async function handleSubmit(): Promise<boolean> {
-    if (saving.value) return false
+    if (saving.value || optionsPending.value || optionsLoadError.value) return false
     try {
       if (!(await validateArtFormForSubmit(basicFormRef.value))) {
         activeTab.value = 'basic'
@@ -668,15 +690,20 @@
   function resetAfterClose(): void {
     form.value = initialForm()
     options.value = undefined
+    optionsPending.value = false
+    optionsLoadError.value = ''
     record.value = undefined
     saveError.value = ''
   }
   async function handleOpen(
     currentOptions: InterfaceOptions,
-    current?: InterfaceRecord
+    current?: InterfaceRecord,
+    pending = false
   ): Promise<void> {
     if (saving.value) return
     options.value = currentOptions
+    optionsPending.value = pending
+    optionsLoadError.value = ''
     record.value = current
     const applicationId =
       current?.applicationId ?? currentOptions.applications.find((item) => item.enabled)?.id ?? ''
@@ -707,5 +734,17 @@
       onConfirm: handleSubmit
     })
   }
-  defineExpose({ handleOpen })
+  function updateOptions(currentOptions: InterfaceOptions, rowId: string): void {
+    if (record.value?.id === rowId) {
+      options.value = currentOptions
+      optionsPending.value = false
+      optionsLoadError.value = ''
+    }
+  }
+  function setOptionsError(rowId: string, message: string): void {
+    if (record.value?.id !== rowId) return
+    optionsPending.value = false
+    optionsLoadError.value = message || '接口选项加载失败，请稍后重试'
+  }
+  defineExpose({ handleOpen, updateOptions, setOptionsError })
 </script>

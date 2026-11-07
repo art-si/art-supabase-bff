@@ -167,7 +167,7 @@ function interfaceWrite(value: Record<string, unknown>): InterfaceWriteInput {
   }
 }
 
-async function mockApi(page: Page): Promise<MockState> {
+async function mockApi(page: Page, optionsDelayMs = 0): Promise<MockState> {
   const state: MockState = {
     rows: initialRows(),
     writes: [],
@@ -232,6 +232,7 @@ async function mockApi(page: Page): Promise<MockState> {
       return
     }
     if (url.pathname === '/api/interfaces/options' && method === 'GET') {
+      if (optionsDelayMs) await new Promise((resolve) => setTimeout(resolve, optionsDelayMs))
       await reply({
         applications: [application],
         environments: [
@@ -422,6 +423,25 @@ async function mockApi(page: Page): Promise<MockState> {
   return state
 }
 
+test('editing an existing interface opens before upstream options finish loading', async ({
+  page
+}) => {
+  const state = await mockApi(page, 4_000)
+  await page.goto('/interfaces')
+  const row = page.getByRole('row').filter({ hasText: '验收示例：库存核对接口' })
+  await expect(row).toBeVisible()
+  await row.getByRole('button', { name: '编辑接口草稿' }).click()
+  const dialog = page.getByRole('dialog', { name: '编辑接口草稿' })
+  await expect(dialog).toBeVisible({ timeout: 1_500 })
+  await expect(dialog.getByText('正在加载应用与上游选项，当前草稿可先查看。')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '保存草稿' })).toBeDisabled()
+  await expect(dialog.getByText('正在加载应用与上游选项，当前草稿可先查看。')).toHaveCount(0, {
+    timeout: 6_000
+  })
+  expect(state.writes).toHaveLength(0)
+  expect(state.errors).toEqual([])
+})
+
 test('two two-step drafts support filtering, empty result and recovery', async ({ page }) => {
   const state = await mockApi(page)
   await page.goto('/interfaces')
@@ -467,7 +487,7 @@ test('create, edit two steps, validate and test with invalid input and stale res
   ).toHaveLength(1)
 
   let row = page.getByRole('row').filter({ hasText: '验收示例：订单审核接口' })
-  await row.getByRole('button', { name: '编辑' }).click()
+  await row.getByRole('button', { name: '编辑接口草稿' }).click()
   editor = page.getByRole('dialog', { name: '编辑接口草稿' })
   await editor.getByRole('tab', { name: /编排步骤/ }).click()
   await editor.getByRole('button', { name: '新增步骤' }).click()

@@ -1,5 +1,10 @@
 <template>
-  <ArtDialog ref="dialogRef" :loading="saving" @closed="clearCredential">
+  <ArtDialog
+    ref="dialogRef"
+    :loading="saving"
+    :confirm-disabled="optionsPending || Boolean(optionsLoadError)"
+    @closed="clearCredential"
+  >
     <div class="grid min-w-0 gap-4">
       <ArtEntitySummary
         compact
@@ -10,6 +15,21 @@
             ? `${upstream.application.name} · ${upstream.code}`
             : '先登记服务定义，再检测连接并启用。'
         "
+      />
+      <ElAlert
+        v-if="optionsPending"
+        title="正在加载应用与环境选项，现有配置可先查看。"
+        type="info"
+        :closable="false"
+        show-icon
+      />
+      <ElAlert
+        v-else-if="optionsLoadError"
+        :title="optionsLoadError"
+        description="请关闭弹窗后重试，选项就绪前不会提交配置。"
+        type="warning"
+        :closable="false"
+        show-icon
       />
       <ElAlert
         v-if="upstream && form.authType !== upstream.authType"
@@ -68,6 +88,8 @@
   const upstream = shallowRef<UpstreamService>()
   const options = shallowRef<UpstreamOptions>()
   const saving = ref(false)
+  const optionsPending = ref(false)
+  const optionsLoadError = ref('')
   const saveError = ref('')
   const canChangeCredentialPolicy = computed(() => hasAuth('BffUpstream:RotateSecret'))
   const reservedHeader =
@@ -282,6 +304,9 @@
 
   function clearCredential(): void {
     form.value.credential = ''
+    upstream.value = undefined
+    optionsPending.value = false
+    optionsLoadError.value = ''
   }
 
   function buildDefinition(): UpstreamDefinition {
@@ -304,7 +329,8 @@
   }
 
   async function handleSubmit(): Promise<boolean> {
-    if (saving.value || !options.value) return false
+    if (saving.value || !options.value || optionsPending.value || optionsLoadError.value)
+      return false
     try {
       if (!(await validateArtFormForSubmit(formRef.value))) return false
     } catch {
@@ -341,9 +367,15 @@
     }
   }
 
-  async function handleOpen(currentOptions: UpstreamOptions, row?: UpstreamService): Promise<void> {
+  async function handleOpen(
+    currentOptions: UpstreamOptions,
+    row?: UpstreamService,
+    pending = false
+  ): Promise<void> {
     if (saving.value) return
     options.value = currentOptions
+    optionsPending.value = pending
+    optionsLoadError.value = ''
     upstream.value = row
     saveError.value = ''
     form.value = {
@@ -370,5 +402,19 @@
     })
   }
 
-  defineExpose({ handleOpen })
+  function updateOptions(currentOptions: UpstreamOptions, rowId: string): void {
+    if (upstream.value?.id === rowId) {
+      options.value = currentOptions
+      optionsPending.value = false
+      optionsLoadError.value = ''
+    }
+  }
+
+  function setOptionsError(rowId: string, message: string): void {
+    if (upstream.value?.id !== rowId) return
+    optionsPending.value = false
+    optionsLoadError.value = message || '应用与环境选项加载失败，请稍后重试'
+  }
+
+  defineExpose({ handleOpen, updateOptions, setOptionsError })
 </script>

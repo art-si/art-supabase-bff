@@ -91,6 +91,7 @@
   } from '@/components/business/business-workspace-header/index.vue'
   import BusinessTableWorkspaceActions from '@/components/business/business-table-workspace-actions/index.vue'
   import BusinessTableRowActions from '@/components/business/business-table-row-actions/index.vue'
+  import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtButtonMore, {
     type ButtonMoreItem
   } from '@/components/core/forms/art-button-more/index.vue'
@@ -120,6 +121,7 @@
   const testDialogRef = ref<InstanceType<typeof InterfaceTestDialog>>()
   const options = shallowRef<InterfaceOptions>()
   const optionsLoading = ref(false)
+  let optionsRequest: Promise<InterfaceOptions | undefined> | undefined
   const optionsError = ref('')
   const summary = shallowRef<InterfaceList['summary']>({
     total: 0,
@@ -241,23 +243,39 @@
   ])
   const { deleteGuardRef, deleteRecord, deleteBusy } = useRecordDeleteGuard(
     'bff_interfaces',
-    '接口草稿'
+    '接口草稿',
+    {
+      bff_interface_versions: {
+        label: '已发布版本',
+        description: '发布历史需要保留，已产生发布版本的接口不能删除。',
+        actionLabel: '查看版本',
+        routeName: 'BffReleases',
+        routeQuery: (record) => ({ recordId: record.targetId }),
+        canNavigate: () => hasAuth('BffRelease:View'),
+        order: 10
+      }
+    }
   )
 
-  async function loadOptions(): Promise<InterfaceOptions | undefined> {
-    if (optionsLoading.value) return options.value
+  function loadOptions(): Promise<InterfaceOptions | undefined> {
+    if (optionsRequest) return optionsRequest
     optionsLoading.value = true
     optionsError.value = ''
-    try {
-      options.value = await fetchInterfaceOptions()
-      return options.value
-    } catch (error) {
-      optionsError.value =
-        error instanceof BffApiError ? error.message : '接口选项加载失败，请稍后重试'
-      return undefined
-    } finally {
-      optionsLoading.value = false
-    }
+    optionsRequest = fetchInterfaceOptions()
+      .then((loaded) => {
+        options.value = loaded
+        return loaded
+      })
+      .catch((error: unknown) => {
+        optionsError.value =
+          error instanceof BffApiError ? error.message : '接口选项加载失败，请稍后重试'
+        return undefined
+      })
+      .finally(() => {
+        optionsLoading.value = false
+        optionsRequest = undefined
+      })
+    return optionsRequest
   }
   onMounted(() => {
     void loadOptions()
@@ -293,15 +311,26 @@
     void tableQueryRef.value?.refreshData()
   }
   async function openCreate(): Promise<void> {
-    const current = await loadOptions()
+    const current = options.value ?? (await loadOptions())
     if (current) await editorDialogRef.value?.handleOpen(current)
   }
-  async function openEdit(row: InterfaceRecord): Promise<void> {
-    const current = await loadOptions()
-    if (current) await editorDialogRef.value?.handleOpen(current, row)
+  function openEdit(row: InterfaceRecord): void {
+    const current = options.value ?? {
+      applications: [row.application],
+      environments: [{ label: environmentLabel(row.environment), value: row.environment }],
+      upstreams: [],
+      networkPolicyConfigured: false,
+      writeTestsConfigured: false
+    }
+    void editorDialogRef.value?.handleOpen(current, row, !options.value)
+    if (!options.value)
+      void loadOptions().then((loaded) => {
+        if (loaded) editorDialogRef.value?.updateOptions(loaded, row.id)
+        else editorDialogRef.value?.setOptionsError(row.id, optionsError.value)
+      })
   }
   async function openTest(row: InterfaceRecord): Promise<void> {
-    const current = await loadOptions()
+    const current = options.value ?? (await loadOptions())
     if (current) await testDialogRef.value?.handleOpen(row, current)
   }
   function showError(error: unknown, fallback: string): void {
@@ -495,14 +524,17 @@
             {
               prop: 'actions',
               label: '操作',
-              width: 122,
+              width: 100,
               fixed: 'right',
               formatter: (row: InterfaceRecord) => (
                 <BusinessTableRowActions>
                   {hasAuth('BffInterface:Edit') && (
-                    <ElButton link type="primary" onClick={() => void openEdit(row)}>
-                      编辑
-                    </ElButton>
+                    <ArtButtonTable
+                      type="edit"
+                      label="编辑接口草稿"
+                      permission="BffInterface:Edit"
+                      onClick={() => openEdit(row)}
+                    />
                   )}
                   <ArtButtonMore
                     list={moreActions(row)}

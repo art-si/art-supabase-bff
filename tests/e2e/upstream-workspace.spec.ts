@@ -1,3 +1,5 @@
+import { mkdirSync } from 'node:fs'
+import path from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
 import type { UpstreamService } from '../../src/types/upstream'
 
@@ -72,7 +74,12 @@ interface MockState {
   pageErrors: string[]
 }
 
-async function mockUpstreamApi(page: Page, networkPolicyConfigured: boolean): Promise<MockState> {
+async function mockUpstreamApi(
+  page: Page,
+  networkPolicyConfigured: boolean,
+  optionsDelayMs = 0,
+  optionsFail = false
+): Promise<MockState> {
   const state: MockState = { rows: initialRows(), writes: [], unexpected: [], pageErrors: [] }
   page.on('pageerror', (error) => state.pageErrors.push(error.message))
   await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
@@ -132,6 +139,11 @@ async function mockUpstreamApi(page: Page, networkPolicyConfigured: boolean): Pr
       return
     }
     if (url.pathname === '/api/upstreams/options' && method === 'GET') {
+      if (optionsDelayMs) await new Promise((resolve) => setTimeout(resolve, optionsDelayMs))
+      if (optionsFail) {
+        await reply({ code: 'TEST_UNAVAILABLE', message: '验收模拟：选项暂不可用' }, 503)
+        return
+      }
       await reply({
         applications: [application],
         environments: [
@@ -244,6 +256,53 @@ async function mockUpstreamApi(page: Page, networkPolicyConfigured: boolean): Pr
   return state
 }
 
+test('editing opens immediately while option data is still loading', async ({ page }) => {
+  const state = await mockUpstreamApi(page, true, 5_000)
+  await page.goto('/upstreams')
+  const row = page.getByRole('row').filter({ hasText: '验收示例：库存查询服务' })
+  await expect(row).toBeVisible()
+  await row.getByRole('button', { name: '编辑上游服务' }).click()
+  const dialog = page.getByRole('dialog', { name: '编辑上游服务' })
+  await expect(dialog).toBeVisible({ timeout: 1_500 })
+  await expect(dialog.getByText('正在加载应用与环境选项，现有配置可先查看。')).toBeVisible()
+  await expect(dialog.getByRole('textbox', { name: '服务名称' })).toHaveValue(
+    '验收示例：库存查询服务'
+  )
+  await expect(dialog.getByText('合成测试应用 · inventory-query')).toBeVisible()
+  await expect(dialog.getByText('正在加载应用与环境选项，现有配置可先查看。')).toHaveCount(0, {
+    timeout: 7_000
+  })
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.evaluate(() => {
+    document.documentElement.classList.add('dark')
+    document.documentElement.dataset.boxMode = 'shadow-mode'
+  })
+  const screenshotPath = path.resolve('.artifacts/ui/upstream-edit-dark-1280.png')
+  mkdirSync(path.dirname(screenshotPath), { recursive: true })
+  await page.screenshot({ path: screenshotPath })
+  expect(state.unexpected).toEqual([])
+  expect(state.pageErrors).toEqual([])
+})
+
+test('edit remains visible with a clear retry path when option loading fails', async ({ page }) => {
+  const state = await mockUpstreamApi(page, true, 700, true)
+  await page.goto('/upstreams')
+  const row = page.getByRole('row').filter({ hasText: '验收示例：库存查询服务' })
+  await expect(row).toBeVisible()
+  await row.getByRole('button', { name: '编辑上游服务' }).click()
+  const dialog = page.getByRole('dialog', { name: '编辑上游服务' })
+  await expect(dialog.getByRole('textbox', { name: '服务名称' })).toHaveValue(
+    '验收示例：库存查询服务'
+  )
+  await expect(dialog.getByText('验收模拟：选项暂不可用')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '保存配置' })).toBeDisabled()
+  const screenshotPath = path.resolve('.artifacts/ui/upstream-edit-options-error.png')
+  mkdirSync(path.dirname(screenshotPath), { recursive: true })
+  await page.screenshot({ path: screenshotPath })
+  expect(state.writes).toHaveLength(0)
+  expect(state.pageErrors).toEqual([])
+})
+
 test('two upstream states, keyword search, empty result and recovery', async ({ page }) => {
   const state = await mockUpstreamApi(page, false)
   await page.goto('/upstreams')
@@ -295,7 +354,7 @@ test('draft creation, metadata edit and write-only credential rotation', async (
   expect(createRequest?.body.status).toBeUndefined()
 
   let row = page.getByRole('row').filter({ hasText: '验收示例：质量分析服务' })
-  await row.getByRole('button', { name: '编辑' }).click()
+  await row.getByRole('button', { name: '编辑上游服务' }).click()
   const editDialog = page.getByRole('dialog', { name: '编辑上游服务' })
   await expect(editDialog).toBeVisible()
   await expect(editDialog.getByPlaceholder('可先留空创建草稿，稍后单独配置凭据')).toHaveCount(0)

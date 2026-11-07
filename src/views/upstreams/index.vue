@@ -106,6 +106,7 @@
   } from '@/components/business/business-workspace-header/index.vue'
   import BusinessTableWorkspaceActions from '@/components/business/business-table-workspace-actions/index.vue'
   import BusinessTableRowActions from '@/components/business/business-table-row-actions/index.vue'
+  import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import ArtButtonMore, {
     type ButtonMoreItem
   } from '@/components/core/forms/art-button-more/index.vue'
@@ -140,6 +141,7 @@
   const credentialDialogRef = ref<InstanceType<typeof UpstreamCredentialDialog>>()
   const options = shallowRef<UpstreamOptions>()
   const optionsLoading = ref(false)
+  let optionsRequest: Promise<UpstreamOptions | undefined> | undefined
   const optionsError = ref('')
   const summary = shallowRef<UpstreamSummary>({
     total: 0,
@@ -288,24 +290,38 @@
         routeQuery: (record) => ({ recordId: record.targetId }),
         canNavigate: () => hasAuth('BffInterface:View'),
         order: 20
+      },
+      bff_interface_versions: {
+        label: '已发布版本',
+        description: '历史发布版本保留固定的上游配置引用，不能删除关联服务。',
+        actionLabel: '查看版本',
+        routeName: 'BffReleases',
+        routeQuery: (record) => ({ recordId: record.targetId }),
+        canNavigate: () => hasAuth('BffRelease:View'),
+        order: 30
       }
     }
   )
 
-  async function loadOptions(): Promise<UpstreamOptions | undefined> {
-    if (optionsLoading.value) return options.value
+  function loadOptions(): Promise<UpstreamOptions | undefined> {
+    if (optionsRequest) return optionsRequest
     optionsLoading.value = true
     optionsError.value = ''
-    try {
-      options.value = await fetchUpstreamOptions()
-      return options.value
-    } catch (error) {
-      optionsError.value =
-        error instanceof BffApiError ? error.message : '应用与环境选项加载失败，请稍后重试'
-      return undefined
-    } finally {
-      optionsLoading.value = false
-    }
+    optionsRequest = fetchUpstreamOptions()
+      .then((loaded) => {
+        options.value = loaded
+        return loaded
+      })
+      .catch((error: unknown) => {
+        optionsError.value =
+          error instanceof BffApiError ? error.message : '应用与环境选项加载失败，请稍后重试'
+        return undefined
+      })
+      .finally(() => {
+        optionsLoading.value = false
+        optionsRequest = undefined
+      })
+    return optionsRequest
   }
   onMounted(() => {
     void loadOptions()
@@ -347,9 +363,19 @@
     await upstreamDialogRef.value?.handleOpen(currentOptions)
   }
 
-  async function openEdit(row: UpstreamService): Promise<void> {
-    const currentOptions = await loadOptions()
-    if (currentOptions) await upstreamDialogRef.value?.handleOpen(currentOptions, row)
+  function openEdit(row: UpstreamService): void {
+    const currentOptions = options.value ?? {
+      applications: [row.application],
+      environments: [{ label: environmentLabel(row.environment), value: row.environment }],
+      credentialManagementReady: false,
+      networkPolicyConfigured: false
+    }
+    void upstreamDialogRef.value?.handleOpen(currentOptions, row, !options.value)
+    if (!options.value)
+      void loadOptions().then((loaded) => {
+        if (loaded) upstreamDialogRef.value?.updateOptions(loaded, row.id)
+        else upstreamDialogRef.value?.setOptionsError(row.id, optionsError.value)
+      })
   }
 
   const environmentLabel = (value: UpstreamEnvironment): string =>
@@ -600,14 +626,17 @@
             {
               prop: 'actions',
               label: '操作',
-              width: 122,
+              width: 100,
               fixed: 'right',
               formatter: (row: UpstreamService) => (
                 <BusinessTableRowActions>
                   {hasAuth('BffUpstream:Edit') && (
-                    <ElButton link type="primary" onClick={() => void openEdit(row)}>
-                      编辑
-                    </ElButton>
+                    <ArtButtonTable
+                      type="edit"
+                      label="编辑上游服务"
+                      permission="BffUpstream:Edit"
+                      onClick={() => openEdit(row)}
+                    />
                   )}
                   <ArtButtonMore
                     list={rowActions(row)}

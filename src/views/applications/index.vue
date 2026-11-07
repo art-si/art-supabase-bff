@@ -13,19 +13,24 @@
     >
       <template #actions><BusinessTableWorkspaceActions :table="tableQueryRef" /></template>
     </BusinessWorkspaceHeader>
-    <ArtTableQuery
-      ref="tableQueryRef"
-      v-model="table.search"
-      class="min-h-0 flex-1"
-      :api-fn="loadApplications"
-      :columns-factory="columnsFactory"
-      :search-items="table.searchItems"
-      :header-actions="table.actions"
-      :enable-cache="false"
-      :search-bar-props="{ showExpand: false, span: 8 }"
-      :table-header-props="{ layout: 'refresh,size' }"
-      :table-props="{ rowKey: 'id', stripe: false }"
-    />
+    <div class="application-page__workspace min-h-0 flex-1">
+      <ArtTableQuery
+        ref="tableQueryRef"
+        v-model="table.search"
+        class="h-full"
+        focusable
+        focus-scope-selector=".application-page__workspace"
+        :api-fn="loadApplications"
+        :columns-factory="columnsFactory"
+        :search-items="table.searchItems"
+        :header-actions="table.actions"
+        header-actions-placement="workspace"
+        :enable-cache="false"
+        :search-bar-props="{ showExpand: false, span: 8 }"
+        :table-header-props="{ layout: 'refresh,size' }"
+        :table-props="{ rowKey: 'id', stripe: false }"
+      />
+    </div>
     <ApplicationDialog ref="applicationDialogRef" @success="tableQueryRef?.refreshData()" />
     <ApplicationMembersDialog ref="membersDialogRef" />
   </div>
