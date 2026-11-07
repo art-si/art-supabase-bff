@@ -77,8 +77,8 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     const session = await authenticate(req)
     if (url.pathname === '/api/auth/session' && req.method === 'GET') {
       const [permissions, navigation] = await Promise.all([
-        database.rpc('bff_actor_permissions', { p_actor: session.member.id }),
-        database.rpc('bff_navigation', { p_actor: session.member.id })
+        database.rpc('bff_actor_permissions', { p_actor: session.member.id }, { get: true }),
+        database.rpc('bff_navigation', { p_actor: session.member.id }, { get: true })
       ])
       controlFailure(permissions.error)
       controlFailure(navigation.error)
