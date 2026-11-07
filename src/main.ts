@@ -1,11 +1,16 @@
 import App from '@/App.vue'
 import { bootstrapRuntime } from '@/bootstrap-runtime'
+import { watch } from 'vue'
 import { useWebsiteConfig } from '@/hooks/core/useWebsiteConfig'
 import { bffSession, signOut } from '@bff/api/bff'
 import { initRouter } from '@bff/router'
-import { createBffWebsiteDefaults } from '@bff/config/branding'
+import { createBffWebsiteDefaults, websiteConfigFromBranding } from '@bff/config/branding'
 
-useWebsiteConfig().setWebsiteConfig(createBffWebsiteDefaults())
+const { setWebsiteConfig } = useWebsiteConfig()
+setWebsiteConfig(createBffWebsiteDefaults())
+watch(bffSession, (session) => {
+  setWebsiteConfig(session?.branding ? websiteConfigFromBranding(session.branding) : createBffWebsiteDefaults())
+})
 
 bootstrapRuntime({
   rootComponent: App,

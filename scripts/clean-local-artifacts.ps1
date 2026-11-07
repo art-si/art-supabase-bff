@@ -56,3 +56,14 @@ foreach ($log in Get-ChildItem -LiteralPath $taskRoot -Force -File -Filter '.art
     Remove-Item -LiteralPath $target -Force
   }
 }
+
+# Older browser builds used dist; current builds use ignored docs.
+$legacyBuild = Join-Path $taskRoot 'dist'
+if (Test-Path -LiteralPath $legacyBuild) {
+  $legacyBuild = Assert-LocalArtifact $legacyBuild
+  $link = Get-ChildItem -LiteralPath $legacyBuild -Recurse -Force -Attributes ReparsePoint | Select-Object -First 1
+  if ($link) { throw "Legacy build contains a link: $($link.FullName)" }
+  if ($PSCmdlet.ShouldProcess($legacyBuild, 'Remove legacy browser build')) {
+    Remove-Item -LiteralPath $legacyBuild -Recurse -Force
+  }
+}

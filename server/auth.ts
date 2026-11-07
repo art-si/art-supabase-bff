@@ -3,7 +3,6 @@ import * as oidc from 'openid-client'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 import { config, authReady } from './config'
 import { oidcIdentityFetch } from './identity-http'
-import { remoteFetch } from './remote-http'
 import { database, requireData } from './database/client'
 import { cookie, setCookie, redirect, HttpError } from './http'
 import {
@@ -30,6 +29,29 @@ interface LoginTransaction {
   verifier: string
   returnTo: string
 }
+interface StoredLoginTransaction {
+  state_hash: string
+  browser_hash: string
+  payload: string
+  expires_at: string
+}
+
+/** One ambiguous save can be replayed with the exact same key, ciphertext and expiry. */
+export async function saveLoginTransaction(transaction: StoredLoginTransaction): Promise<void> {
+  const save = () =>
+    database
+      .from('bff_auth_transactions')
+      .upsert(transaction, { onConflict: 'state_hash' })
+      .select('state_hash')
+      .abortSignal(AbortSignal.timeout(8000))
+      .single()
+  let result = await save()
+  if (result.error && (result.status === 0 || result.status === 408 || result.status >= 500))
+    result = await save()
+  const stored: unknown = requireData(result)
+  if (!isObjectRecord(stored) || stored.state_hash !== transaction.state_hash)
+    throw new HttpError(503, '登录请求暂时无法保存，请重新发起登录')
+}
 interface Tokens {
   accessToken: string
   refreshToken: string
@@ -49,13 +71,6 @@ export interface Session {
   tokens: Tokens
 }
 let provider: Promise<oidc.Configuration> | undefined
-function loginStartFailure(code: string, cause?: unknown): never {
-  console.error('[bff] OAuth start failed', {
-    stage: code,
-    kind: cause instanceof Error ? cause.name : 'UnknownError'
-  })
-  throw new HttpError(503, '统一登录暂时无法发起，请稍后重试', code, { cause })
-}
 function getProvider(): Promise<oidc.Configuration> {
   if (!authReady())
     throw new HttpError(503, '统一登录尚未配置完成，请联系平台管理员', 'AUTH_NOT_CONFIGURED')
@@ -108,16 +123,11 @@ export async function startLogin(
       redirect(res, safeReturnPath(url.searchParams.get('returnTo')))
       return
     } catch (error) {
-      if (!(error instanceof HttpError) || error.status !== 401) throw error
+      if (!(error instanceof HttpError) || ![401, 503].includes(error.status)) throw error
     }
   }
-  let settings: oidc.Configuration
-  try {
-    settings = await getProvider()
-  } catch (error) {
-    if (error instanceof HttpError) throw error
-    loginStartFailure('AUTH_DISCOVERY_UNAVAILABLE', error)
-  }
+  if (!authReady())
+    throw new HttpError(503, '统一登录尚未配置完成，请联系平台管理员', 'AUTH_NOT_CONFIGURED')
   const verifier = oidc.randomPKCECodeVerifier(),
     state = oidc.randomState(),
     browser = opaqueToken()
@@ -125,58 +135,54 @@ export async function startLogin(
     verifier,
     returnTo: safeReturnPath(url.searchParams.get('returnTo'))
   }
-  const authorizationUrl = oidc.buildAuthorizationUrl(settings, {
+  const authorizationUrl = new URL(`${config.issuer.replace(/\/$/, '')}/oauth/authorize`)
+  authorizationUrl.search = new URLSearchParams({
+    client_id: config.clientId,
+    response_type: 'code',
     redirect_uri: `${config.origin}/api/auth/callback`,
     // UserInfo supports the existing pro HS256 signer without requesting an ID token.
     scope: 'email profile',
     code_challenge: await oidc.calculatePKCECodeChallenge(verifier),
     code_challenge_method: 'S256',
     state
-  })
-  // Supabase's headless authorize endpoint does not use browser login cookies.
-  // Resolve its redirect on the server; authentication and consent still run at pro.
-  let authorization: Response
+  }).toString()
+  const reason = url.searchParams.get('reason') || ''
+  if (reason === 'service_unavailable') {
+    redirect(
+      res,
+      resolveAuthorizationLoginRedirect(authorizationUrl, config.authorizationUi, true, reason)
+    )
+    return
+  }
   try {
-    authorization = await remoteFetch(authorizationUrl, {
-      redirect: 'manual',
-      signal: AbortSignal.timeout(15000)
+    await saveLoginTransaction({
+      state_hash: digest(state),
+      browser_hash: digest(browser),
+      payload: seal(transaction, config.sessionKey),
+      expires_at: new Date(Date.now() + 600000).toISOString()
     })
   } catch (error) {
-    loginStartFailure('AUTH_AUTHORIZE_TRANSPORT', error)
-  }
-  const location = authorization.headers.get('location')
-  if (![302, 303].includes(authorization.status) || !location) {
-    loginStartFailure('AUTH_AUTHORIZE_RESPONSE')
-  }
-  let loginUrl: string
-  try {
-    loginUrl = resolveAuthorizationLoginRedirect(
-      location,
-      config.authorizationUi,
-      forceLogin,
-      url.searchParams.get('reason') || ''
+    console.error('[bff] OAuth start failed', {
+      stage: 'AUTH_TRANSACTION_SAVE',
+      kind: error instanceof Error ? error.name : 'UnknownError'
+    })
+    res.setHeader('X-BFF-Auth-Error', 'AUTH_TRANSACTION_SAVE')
+    redirect(
+      res,
+      resolveAuthorizationLoginRedirect(
+        authorizationUrl,
+        config.authorizationUi,
+        true,
+        'service_unavailable'
+      )
     )
-  } catch (error) {
-    loginStartFailure('AUTH_AUTHORIZE_REDIRECT', error)
-  }
-  try {
-    requireData(
-      await database
-        .from('bff_auth_transactions')
-        .insert({
-          state_hash: digest(state),
-          browser_hash: digest(browser),
-          payload: seal(transaction, config.sessionKey),
-          expires_at: new Date(Date.now() + 600000).toISOString()
-        })
-        .select('state_hash')
-        .single()
-    )
-  } catch (error) {
-    loginStartFailure('AUTH_TRANSACTION_SAVE', error)
+    return
   }
   setCookie(res, 'bff_login', browser, 600)
-  redirect(res, loginUrl)
+  redirect(
+    res,
+    resolveAuthorizationLoginRedirect(authorizationUrl, config.authorizationUi, forceLogin, reason)
+  )
 }
 
 export async function finishLogin(
@@ -291,7 +297,10 @@ async function refresh(row: SessionRow, tokens: Tokens): Promise<Tokens> {
         throw new AggregateError([error, result.error], '会话失效处理失败', { cause: error })
       throw new HttpError(401, '登录已过期，请重新登录', 'UNAUTHENTICATED', { cause: error })
     }
-    throw error
+    if (error instanceof HttpError) throw error
+    throw new HttpError(503, '身份中心暂时无法连接，请重新登录', 'AUTH_SESSION_UNAVAILABLE', {
+      cause: error
+    })
   } finally {
     refreshes.delete(row.token_hash)
   }
@@ -351,7 +360,10 @@ export async function authenticate(req: IncomingMessage): Promise<Session> {
     .eq('token_hash', digest(token))
     .gt('expires_at', new Date().toISOString())
     .maybeSingle()
-  if (sessionResult.error) throw new Error('登录状态检查失败', { cause: sessionResult.error })
+  if (sessionResult.error)
+    throw new HttpError(503, '登录状态暂时无法读取，请重新登录', 'SESSION_UNAVAILABLE', {
+      cause: sessionResult.error
+    })
   if (!sessionResult.data) throw new HttpError(401, '登录已过期，请重新登录', 'UNAUTHENTICATED')
   const { row, member } = sessionSnapshot(sessionResult.data)
   let tokens = parseTokens(unseal(row.payload, config.sessionKey))

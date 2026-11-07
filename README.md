@@ -1,6 +1,6 @@
 # art-supabase-bff
 
-基于 art-supabase-pro npm 主仓组件体系的 BFF 平台，已接入统一认证、应用管理、菜单、字典、角色、成员、上游服务和接口编排。
+基于 art-supabase-pro npm 主仓组件体系的 BFF 平台，已接入统一认证、应用管理、菜单、字典、角色、成员、系统品牌、上游服务、接口编排及版本发布。
 
 ## 边界
 
@@ -17,7 +17,7 @@
 1. 安装依赖：pnpm install。
 2. 根据 .env.example 准备 .env.local；服务端密钥不得使用 VITE_ 前缀。
 3. 启动开发服务：pnpm dev，默认 http://localhost:3010。
-4. 生产构建：pnpm build；启动构建版本：pnpm start。
+4. 生产构建：pnpm build，浏览器产物写入 `docs/`；启动构建版本：pnpm start。可用 `VITE_OUT_DIR` 覆盖构建输出目录，构建和启动需使用同一个值。
 
 同一时间只运行一个 BFF 服务。开发服务和构建版本均使用 3010；切换前在原终端按 Ctrl+C 停止旧服务，再运行 pnpm dev 或 pnpm start。浏览器访问 http://localhost:3010；localhost:3006 是 pro 自己的开发服务。
 
@@ -83,7 +83,34 @@ Windows 上可复用已登录的 Supabase CLI 凭据执行初始化工具，凭�
 - 创建和修改保存为草稿；修改后需重新验证。验证检查参数、路径占位符、步骤顺序及绑定的上游配置版本。上游配置变化后须重新选择版本并验证。
 - 试运行要求当前草稿已验证、应用及上游已启用，并通过出站策略与凭据就绪检查。总执行时限为 30 秒，前序失败时后续步骤跳过。页面展示步骤摘要和映射结果；配置或凭据在执行期间变化时，结果标为过期。
 - `BffInterface:Test` 控制普通测试；非 GET 步骤还需 `BffInterface:TestWrite`。写测试仅用于开发或预发布环境，并须配置 `BFF_INTERFACE_TEST_WRITE_ORIGINS` 为受控测试源站，同时包含在 `BFF_UPSTREAM_ALLOWED_ORIGINS` 中。生产草稿测试始终只允许 GET。
-- 上游存在接口引用时，通过共用关联检查定位接口并处理绑定，再删除上游。草稿暂不提供对外调用入口；发布与回滚按已确认路线继续开发。
+- 上游存在草稿引用时，通过共用关联检查定位接口并处理绑定，再删除上游。已发布版本保留固定配置引用，不能删除关联上游或接口。
+
+## 系统配置
+
+在 **系统管理 → 系统配置** 维护系统名称、简称、说明、Logo、浏览器图标和水印。默认系统名称为“BFF平台”；图片支持 HTTPS 地址或本站相对路径，留空恢复公共默认图标。
+
+页面、表单、主题和预览直接使用 pro npm 包的品牌配置模式。BFF 只实现自己的数据接口、版本比较和 `BffBrand:View` / `BffBrand:Edit` 权限；不在 BFF 重复实现登录、品牌组件或通用设置页。保存后当前页共享侧栏、标题、图标与水印立即使用新配置；其他会话重新加载后取得最新配置。并发修改会保留当前输入，确认重新加载后才丢弃。
+
+该配置按当前 BFF 租户保存，与 pro 的网站设置、认证策略、注册和密码配置相互独立。页面由后端导航下发；升级到支持 `branding` 的宿主后，通过 `EnableBrandingNavigation` 开放。
+
+## 版本发布与调用
+
+通过 **服务管理 → 版本发布**，检查草稿就绪状态、生成发布版本、查看版本快照及发布事件，执行回滚和启停。每个接口独立显示运行版本与当前草稿；操作说明必填并保留到事件记录中。
+
+1. 启用所属应用和上游，配置网络策略与服务端凭据。
+2. 在接口编排中验证当前草稿并完成成功测试；上游配置或凭据变化后重新测试。
+3. 在版本发布中执行发布前检查并填写说明。发布保存不可修改的定义与上游配置快照，再切换运行版本。
+4. 修改草稿不会改变当前运行版本。回滚切到已有快照并保留启停状态；停用的接口回滚后仍需单独启用。停用立即关闭后续调用入口。
+
+运行入口为同源 `/api/gateway/{应用编码}/{环境}/{发布路径}`，例如发布路径 `/orders/{orderId}` 对应 `/api/gateway/demo-ops/development/orders/ORDER-001`。路径中的示例应用须替换为真实应用编码；可从页面复制相对路径。回调和运行域名均不写死在前端。
+
+- 运行调用要求有效 BFF 会话及应用授权，并具备 `BffInterface:Invoke`；非 GET 还需 `BffInterface:InvokeWrite`、精确 Origin、当前会话 CSRF 请求头及 UUID 格式的 `Idempotency-Key`。网关不提供匿名或跨域调用。
+- 同一租户、成员的写请求编号只能使用一次；相同版本与输入在 15 分钟内可重放已加密缓存的映射结果，进行中的请求返回 202。输入变化、版本变化、缓存过期或执行结果未知时拒绝重新执行原编号。结果未知表示上游可能已产生副作用，应先按服务端请求编号核对，不能自动换编号重试。
+- 网关仅返回服务端 `requestId`、发布版本号与声明的输出字段。调用元数据不保存实际路径参数、请求体、原始响应或凭据；短时重放结果通过会话主密钥派生的独立用途密钥加密，并绑定租户、成员及版本。会话密钥轮换后旧重放缓存可能不可读，不会因此重执行上游。
+- 同一成员每分钟最多 120 次、并发 4 次；同一租户每分钟最多 600 次、并发 16 次。整次编排最长 30 秒，不自动重试上游写请求。GET 入口不能包含非 GET 上游步骤。
+- 历史版本固定上游配置，运行仍检查当前应用、服务、网络策略及凭据。历史配置与当前凭据策略不兼容时拒绝执行，不恢复旧秘密。
+
+菜单与权限遵循先部署宿主、再逐租户开放的顺序。确认运行宿主声明 `releases` 能力后，可使用 `EnableReleaseNavigation` 管理动作开放已验收的版本页面与调用权限；既有成员的职责角色仍需由管理员按需授权。
 
 ## 验证
 
@@ -98,7 +125,7 @@ node --use-env-proxy --import tsx tests/integration/http-security.ts
 
 浏览器回归和最后一项需要本地服务运行于 http://localhost:3012，可通过 BFF_TEST_ORIGIN 指定其他本机端口。浏览器回归只使用合成 API 数据，验证实际 npm 页面和动态路由；真实 API 检查使用右边数据库中的隔离测试租户，结束后清理所有测试记录。这两项都不能代替真实统一登录验收。
 
-代理环境运行本机 HTTP 联测时，先设置 `$env:NO_PROXY='localhost,127.0.0.1'`。数据库回滚验证包含 `control-plane-schema.sql`、`role-access.sql`、`application-authorization.sql`、`upstream-schema.sql` 和 `interface-schema.sql`；仅执行 `ValidateBffSchema` 不提交结构变更。
+代理环境运行本机 HTTP 联测时，先设置 `$env:NO_PROXY='localhost,127.0.0.1'`。数据库回滚验证包含 `control-plane-schema.sql`、`role-access.sql`、`application-authorization.sql`、`upstream-schema.sql`、`interface-schema.sql` 和 `release-schema.sql`；仅执行 `ValidateBffSchema` 不提交结构变更。隔离发布与网关联测使用 `node --use-env-proxy --import tsx tests/integration/release-http.ts`，需要受控本机上游策略，不能指向真实业务服务。
 
 成员页视觉数据可通过 `node --use-env-proxy --import tsx tests/integration/ui-fixtures.ts apply` 准备，并以同命令的 `remove` 清理。该工具只创建两条停用、无法匹配 pro 签发者的临时验收记录，不创建身份中心账号、不授予访问权限；验收后必须清理。
 
@@ -116,4 +143,4 @@ tests/fixtures/ui-server.ts 仅供界面测试，提供内存中的虚构数据�
 
 公共源码旧副本已移至忽略目录 `.artifacts/framework-source-backup`，不参与运行、构建或提交。移出前已保存 Git 基线；工程内不再维护这些公共副本。
 
-详见 docs/architecture.md。
+详见 ARCHITECTURE.md。

@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks'
 import type {
-  InterfaceRecord,
+  InterfaceExecutionDefinition,
   InterfaceScalar,
   InterfaceStep,
   InterfaceTestResult,
@@ -20,6 +20,14 @@ export type InterfaceTargetLoader = (
   step: InterfaceStep,
   remainingMs: number
 ) => Promise<InterfaceStepTarget>
+export interface InterfaceRunOptions {
+  policy?: UpstreamNetworkPolicy
+  /** One authorized snapshot before any outbound request; each step still reloads its target. */
+  preflight?: (
+    steps: readonly InterfaceStep[],
+    remainingMs: number
+  ) => Promise<InterfaceStepTarget[]>
+}
 
 function networkMessage(code: string): string {
   switch (code) {
@@ -43,10 +51,10 @@ function networkMessage(code: string): string {
 }
 /** Sequential, bounded business composition; no scripts, retries, headers or raw bodies are exposed. */
 export async function runInterface(
-  definition: InterfaceRecord,
+  definition: InterfaceExecutionDefinition,
   input: Record<string, InterfaceScalar>,
   loadTarget: InterfaceTargetLoader,
-  policy: UpstreamNetworkPolicy = upstreamPolicy
+  options: InterfaceRunOptions = {}
 ): Promise<InterfaceTestResult> {
   const started = performance.now()
   const deadline = started + 30_000
@@ -83,8 +91,15 @@ export async function runInterface(
     const issues = validateInterfaceDefinition(definition)
     if (issues.length) throw new HttpError(400, '接口定义尚未通过校验，请先修复编排')
     // Resolve every target before the first external side effect. Each step rechecks authority below.
-    for (const step of definition.definition.steps)
-      rememberCredential(await loadTarget(step, remaining()))
+    if (options.preflight) {
+      const targets = await options.preflight(definition.definition.steps, remaining())
+      if (targets.length !== definition.definition.steps.length)
+        throw new HttpError(503, '上游就绪检查未返回完整目标，请稍后重试')
+      targets.forEach(rememberCredential)
+    } else {
+      for (const step of definition.definition.steps)
+        rememberCredential(await loadTarget(step, remaining()))
+    }
     for (const step of definition.definition.steps) {
       if (trace.some((item) => item.status === 'failed')) {
         trace.push({
@@ -120,7 +135,7 @@ export async function runInterface(
             credential: target.credential
           },
           Math.min(target.timeoutMs, remaining()),
-          policy
+          options.policy ?? upstreamPolicy
         )
         trace.push({
           key: step.key,

@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
+import { randomUUID } from 'node:crypto'
 import { createReadStream, existsSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { config, authReady } from './config'
@@ -41,6 +42,15 @@ import {
   testInterface,
   interfaceReferences
 } from './interfaces'
+import {
+  listReleases,
+  releaseOptions,
+  releaseHistory,
+  releaseReadiness,
+  writeRelease
+} from './releases'
+import { handleGateway } from './gateway'
+import { brandingDto, readBranding, writeBranding } from './branding'
 import TreeUtils from 'art-supabase-pro/src/utils/tree.ts'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 
@@ -48,16 +58,24 @@ let vite: import('vite').ViteDevServer | undefined
 let viteReady: Promise<import('vite').ViteDevServer> | undefined
 
 export async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const url = new URL(req.url || '/', config.origin)
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('Referrer-Policy', 'no-referrer')
   res.setHeader('X-Frame-Options', 'DENY')
+  let url: URL
+  try {
+    url = new URL(req.url || '/', config.origin)
+  } catch {
+    json(res, { code: 'INVALID_URL', message: '请求地址格式有误' }, 400)
+    return
+  }
+  const requestId = url.pathname.startsWith('/api/gateway/') ? randomUUID() : undefined
+  if (requestId) res.setHeader('X-Request-Id', requestId)
   try {
     if (url.pathname === '/api/health' && req.method === 'GET') {
       json(res, {
         status: 'ok',
         authenticationConfigured: authReady(),
-        capabilities: ['upstreams', 'interfaces']
+        capabilities: ['upstreams', 'interfaces', 'releases']
       })
       return
     }
@@ -75,16 +93,28 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       return
     }
     const session = await authenticate(req)
+    if (requestId) {
+      await handleGateway(req, res, session, url, requestId)
+      return
+    }
     if (url.pathname === '/api/auth/session' && req.method === 'GET') {
-      const [permissions, navigation] = await Promise.all([
-        database.rpc('bff_actor_permissions', { p_actor: session.member.id }),
-        database.rpc('bff_navigation', { p_actor: session.member.id })
-      ])
-      controlFailure(permissions.error)
-      controlFailure(navigation.error)
-      const nodes: unknown = navigation.data
-      if (!Array.isArray(nodes) || !nodes.every(isObjectRecord))
-        throw new Error('Invalid navigation response')
+      const snapshot = await database.rpc(
+        'bff_session_context',
+        { p_actor: session.member.id },
+        { get: true }
+      )
+      controlFailure(snapshot.error)
+      const context: unknown = snapshot.data
+      if (
+        !isObjectRecord(context) ||
+        !Array.isArray(context.navigation) ||
+        !context.navigation.every(isObjectRecord) ||
+        !Array.isArray(context.permissions) ||
+        !context.permissions.every((value: unknown) => typeof value === 'string')
+      )
+        throw new Error('Invalid session context')
+      const nodes = context.navigation
+      const permissions = context.permissions
       json(res, {
         user: {
           id: session.member.id,
@@ -94,12 +124,21 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
           tenantId: session.member.tenant_id
         },
         csrfToken: session.row.csrf_token,
-        permissions: permissions.data,
+        permissions,
+        branding: brandingDto(context.branding),
         menu: new TreeUtils({ parentKey: 'parentId' }).listToTree(
           nodes.map((node) =>
             node.component === '/shared/system/role'
               ? { ...node, props: { organizationScope: false } }
-              : node
+              : node.component === '/shared/system/website-config'
+                ? {
+                    ...node,
+                    props: {
+                      profile: 'branding',
+                      canEdit: permissions.includes('BffBrand:Edit')
+                    }
+                  }
+                : node
           )
         )
       })
@@ -108,6 +147,44 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     if (url.pathname === '/api/control/menus' && req.method === 'GET') {
       json(res, await readMenus(session, url.searchParams.get('catalog') === '1'))
       return
+    }
+    if (url.pathname === '/api/control/branding') {
+      if (req.method === 'GET') {
+        json(res, await readBranding(session))
+        return
+      }
+      if (req.method === 'POST') {
+        json(res, await writeBranding(req, session))
+        return
+      }
+    }
+    if (url.pathname === '/api/releases/options' && req.method === 'GET') {
+      json(res, await releaseOptions(session))
+      return
+    }
+    if (url.pathname === '/api/releases' && req.method === 'GET') {
+      json(res, await listReleases(session, url))
+      return
+    }
+    const releaseResource =
+      /^\/api\/releases\/([^/]+)\/(history|readiness|publish|rollback|status)$/.exec(url.pathname)
+    if (releaseResource) {
+      const [, id, operation] = releaseResource
+      if (operation === 'history' && req.method === 'GET') {
+        json(res, await releaseHistory(session, id, url))
+        return
+      }
+      if (operation === 'readiness' && req.method === 'GET') {
+        json(res, await releaseReadiness(session, id, url))
+        return
+      }
+      if (
+        (operation === 'publish' || operation === 'rollback' || operation === 'status') &&
+        req.method === 'POST'
+      ) {
+        json(res, await writeRelease(req, session, id, operation))
+        return
+      }
     }
     if (url.pathname === '/api/interfaces/options' && req.method === 'GET') {
       json(res, await interfaceOptions(session))
@@ -280,7 +357,8 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     const known = error instanceof HttpError
     if (!known)
       console.error('[bff] request failed', {
-        path: url.pathname,
+        path: requestId ? '/api/gateway/*' : url.pathname,
+        ...(requestId ? { requestId } : {}),
         kind: error instanceof Error ? error.name : 'UnknownError'
       })
     if (url.pathname === '/api/auth/callback') {
@@ -290,23 +368,27 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       }
       redirect(
         res,
-        `/auth/login?error=${known && error.code === 'ACCESS_NOT_GRANTED' ? 'access_denied' : url.searchParams.get('error') === 'access_denied' ? 'authorization_cancelled' : 'login_failed'}`
+        `/api/auth/login?restart=1&force_login=1&reason=${url.searchParams.get('error') === 'access_denied' ? 'authorization_cancelled' : 'login_failed'}`
       )
       return
     }
     if (url.pathname === '/api/auth/login') {
-      const query = new URLSearchParams({
-        error: known && error.code === 'ACCESS_NOT_GRANTED' ? 'access_denied' : 'login_unavailable',
-        returnTo: safeReturnPath(url.searchParams.get('returnTo'))
-      })
-      redirect(res, `/auth/login?${query}`)
+      json(
+        res,
+        {
+          code: known ? error.code : 'AUTH_UNAVAILABLE',
+          message: known ? error.message : '统一登录暂时无法连接，请稍后重试'
+        },
+        known ? error.status : 503
+      )
       return
     }
     json(
       res,
       {
         code: known ? error.code : 'INTERNAL_ERROR',
-        message: known ? error.message : '服务暂时不可用，请稍后重试'
+        message: known ? error.message : '服务暂时不可用，请稍后重试',
+        ...(requestId ? { requestId } : {})
       },
       known ? error.status : 500
     )
@@ -317,22 +399,31 @@ const server = createServer((req, res) => {
     void handleApi(req, res)
     return
   }
-  const pageUrl = new URL(req.url || '/', config.origin)
+  let pageUrl: URL
+  try {
+    pageUrl = new URL(req.url || '/', config.origin)
+  } catch {
+    res.writeHead(400)
+    res.end()
+    return
+  }
   if (req.method === 'GET' && (pageUrl.pathname === '/' || pageUrl.pathname === '/auth/login')) {
     const error = pageUrl.searchParams.get('error')
-    if (error === 'access_denied' || error === 'service_unavailable' || !error) {
-      const query = new URLSearchParams({
-        returnTo: safeReturnPath(pageUrl.searchParams.get('returnTo'))
-      })
-      if (error === 'access_denied') {
-        query.set('force_login', '1')
-        query.set('reason', error)
-      }
-      if (error === 'service_unavailable') query.set('restart', '1')
-      if (pageUrl.searchParams.get('signed_out') === '1') query.set('force_login', '1')
-      redirect(res, `/api/auth/login?${query}`)
-      return
+    const query = new URLSearchParams({
+      returnTo: safeReturnPath(pageUrl.searchParams.get('returnTo'))
+    })
+    if (error === 'access_denied') {
+      query.set('force_login', '1')
+      query.set('reason', error)
     }
+    if (error) query.set('restart', '1')
+    if (error === 'login_failed' || error === 'authorization_cancelled') {
+      query.set('force_login', '1')
+      query.set('reason', error)
+    }
+    if (pageUrl.searchParams.get('signed_out') === '1') query.set('force_login', '1')
+    redirect(res, `/api/auth/login?${query}`)
+    return
   }
   if (!config.production) {
     void (async () => {
@@ -347,7 +438,7 @@ const server = createServer((req, res) => {
     })()
     return
   }
-  const root = path.resolve('dist')
+  const root = path.resolve(config.browserOutputDir)
   let file: string
   try {
     file = path.resolve(

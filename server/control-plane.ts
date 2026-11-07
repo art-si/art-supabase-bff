@@ -70,8 +70,10 @@ const menuComponents = new Set([
   '/bff/applications/index',
   '/bff/upstreams/index',
   '/bff/interfaces/index',
+  '/bff/releases/index',
   '/shared/system/menu',
   '/shared/system/role',
+  '/shared/system/website-config',
   '/bff/system/member/index',
   '/shared/data-center/dict'
 ])
@@ -375,7 +377,8 @@ export async function tableColumnRuntime(session: Session, url: URL): Promise<un
     '/data-center/dict': 'DataCenter:Dict:View',
     '/applications': 'BffApplication:View',
     '/upstreams': 'BffUpstream:View',
-    '/interfaces': 'BffInterface:View'
+    '/interfaces': 'BffInterface:View',
+    '/releases': 'BffRelease:View'
   }
   const routePath = url.searchParams.get('routePath') || ''
   const permission = Object.hasOwn(routes, routePath) ? routes[routePath] : undefined

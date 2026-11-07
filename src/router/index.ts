@@ -20,6 +20,7 @@ registerApplicationViewModules(
 registerApplicationViewModules('shared', '/shared', {
   '/shared/system/menu.vue': () => import('@/views/system/menu/index.vue'),
   '/shared/system/role.vue': () => import('@/views/system/role/index.vue'),
+  '/shared/system/website-config.vue': () => import('@/views/system/website-config/index.vue'),
   '/shared/data-center/dict.vue': () => import('@/views/data-center/dict/index.vue')
 })
 
@@ -29,7 +30,7 @@ export const router = createRouter({
     {
       path: '/auth/login',
       name: 'Login',
-      component: () => import('@bff/views/auth/error/index.vue'),
+      component: { render: () => null },
       meta: { title: '统一认证', isHideTab: true }
     },
     {
@@ -71,7 +72,18 @@ export function initRouter(app: App<Element>): void {
     useWorktabStore().clearAll()
   })
   router.beforeEach(async (to) => {
-    if (to.path.startsWith('/auth/') || to.path === '/403') return true
+    if (to.path === '/auth/login') {
+      const query = new URLSearchParams({
+        returnTo: typeof to.query.returnTo === 'string' ? to.query.returnTo : '/applications'
+      })
+      if (to.query.signed_out === '1' || to.query.error === 'access_denied')
+        query.set('force_login', '1')
+      if (typeof to.query.error === 'string') query.set('restart', '1')
+      if (to.query.error === 'access_denied') query.set('reason', 'access_denied')
+      window.location.replace('/api/auth/login?' + query)
+      return false
+    }
+    if (to.path === '/403') return true
     const recoveredPath = router.resolve({
       path: to.path,
       query: omit(to.query, '_bff_auth_retry'),
@@ -102,8 +114,13 @@ export function initRouter(app: App<Element>): void {
     } catch {
       if (to.query._bff_auth_retry === '1') {
         window.location.replace(
-          '/auth/login?' +
-            new URLSearchParams({ error: 'login_unavailable', returnTo: recoveredPath })
+          '/api/auth/login?' +
+            new URLSearchParams({
+              reason: 'service_unavailable',
+              restart: '1',
+              force_login: '1',
+              returnTo: recoveredPath
+            })
         )
         return false
       }

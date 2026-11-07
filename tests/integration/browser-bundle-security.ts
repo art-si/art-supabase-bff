@@ -4,7 +4,7 @@ import path from 'node:path'
 import { config } from '../../server/config'
 import { credentialKeyring } from '../../server/upstream-credentials'
 
-const root = path.resolve('dist')
+const root = path.resolve(config.browserOutputDir)
 const credentials = [config.clientSecret, config.sessionKey, config.databaseKey]
 credentials.push(...credentialKeyring(config.credentialKeys, config.credentialKeyId).keys.values())
 assert.ok(

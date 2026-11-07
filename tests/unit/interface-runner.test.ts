@@ -25,16 +25,34 @@ test('composition executes dependent calls, preserves base prefixes and exposes 
   const address = server.address()
   assert.ok(address && typeof address !== 'string')
   const origin = `http://127.0.0.1:${address.port}`
+  let batchChecks = 0
+  let executionChecks = 0
   try {
     const result = await runInterface(
       interfaceRecordFixture(),
       { orderId: 'A 01' },
-      async () => ({ baseUrl: `${origin}/v1`, timeoutMs: 2000 }),
-      { allowedOrigins: [origin], allowedCidrs: [], allowLocalHttp: true, production: false }
+      async () => {
+        executionChecks += 1
+        return { baseUrl: `${origin}/v1`, timeoutMs: 2000 }
+      },
+      {
+        policy: {
+          allowedOrigins: [origin],
+          allowedCidrs: [],
+          allowLocalHttp: true,
+          production: false
+        },
+        preflight: async (steps) => {
+          batchChecks += 1
+          return steps.map(() => ({ baseUrl: `${origin}/v1`, timeoutMs: 2000 }))
+        }
+      }
     )
     assert.equal(result.passed, true, JSON.stringify(result))
     assert.deepEqual(result.output, { orderNo: 'DEMO-001', customerName: '示例客户' })
     assert.deepEqual(requests, ['/v1/orders/A%2001', '/v1/customers/C%2001'])
+    assert.equal(batchChecks, 1)
+    assert.equal(executionChecks, 2)
     assert.ok(!JSON.stringify(result).includes('never-return'))
   } finally {
     server.close()
@@ -75,14 +93,14 @@ test('upstream failures stop following requests and credential echoes cannot esc
     const failed = interfaceRecordFixture()
     failed.definition.steps[0].path = '/fail'
     failed.definition.steps[0].pathParams = []
-    const result = await runInterface(failed, { orderId: 'A' }, loader, policy)
+    const result = await runInterface(failed, { orderId: 'A' }, loader, { policy })
     assert.equal(result.passed, false)
     assert.equal(calls, 1)
     assert.equal(result.steps[1].status, 'skipped')
     assert.ok(!JSON.stringify(result).includes('private-provider-body'))
     const echo = interfaceRecordFixture()
     echo.definition.outputs = [stepBinding('orderNo', 'order', '/orderNo')]
-    const protectedResult = await runInterface(echo, { orderId: 'A' }, loader, policy)
+    const protectedResult = await runInterface(echo, { orderId: 'A' }, loader, { policy })
     assert.equal(protectedResult.passed, false)
     assert.deepEqual(protectedResult.output, {})
     assert.ok(!JSON.stringify(protectedResult).includes(secret))
@@ -93,7 +111,7 @@ test('upstream failures stop following requests and credential echoes cannot esc
       async () => {
         throw new HttpError(409, '上游服务尚未启用')
       },
-      policy
+      { policy }
     )
     assert.equal(preflight.passed, false)
     assert.equal(calls, before)

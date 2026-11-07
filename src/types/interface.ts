@@ -68,6 +68,11 @@ export interface InterfaceRecord extends InterfaceWriteInput {
   updatedAt: string
 }
 
+export interface InterfaceExecutionDefinition extends InterfaceWriteInput {
+  id: string
+  version: number
+}
+
 export interface InterfaceListQuery {
   current: number
   size: number

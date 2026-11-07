@@ -33,6 +33,7 @@ const origin = resolveBffOrigin(env.BFF_ORIGIN, production, port)
 export const config = {
   port,
   origin,
+  browserOutputDir: env.VITE_OUT_DIR || 'docs',
   issuer: env.BFF_AUTH_ISSUER || 'https://ckbftoopuyophiebamwy.supabase.co/auth/v1',
   authorizationUi:
     env.BFF_AUTH_UI_URL || 'https://art-si.github.io/art-supabase-pro/#/auth/oauth-consent',
