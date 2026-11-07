@@ -75,7 +75,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       json(res, {
         status: 'ok',
         authenticationConfigured: authReady(),
-        capabilities: ['upstreams', 'interfaces', 'releases']
+        capabilities: ['upstreams', 'interfaces', 'branding', 'releases']
       })
       return
     }
