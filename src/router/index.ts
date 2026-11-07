@@ -1,5 +1,6 @@
 import type { App, Component } from 'vue'
 import { watch } from 'vue'
+import { omit } from 'lodash-es'
 import { createRouter, createWebHistory } from 'vue-router'
 import { RouteRegistry } from '@/router/core/route-registry'
 import { registerApplicationViewModules } from '@/router/core/component-loader'
@@ -71,6 +72,11 @@ export function initRouter(app: App<Element>): void {
   })
   router.beforeEach(async (to) => {
     if (to.path.startsWith('/auth/') || to.path === '/403') return true
+    const recoveredPath = router.resolve({
+      path: to.path,
+      query: omit(to.query, '_bff_auth_retry'),
+      hash: to.hash
+    }).fullPath
     try {
       if (!bffSession.value) await loadSession()
       if (!bffSession.value) {
@@ -88,13 +94,29 @@ export function initRouter(app: App<Element>): void {
         registry.register(menus)
         useWorktabStore().validateWorktabs(router)
         // Match pro's route replay: Vue Router 5 drops embedded query strings in path objects.
-        return to.path === '/' ? menuStore.getHomePath() : to.fullPath
+        return to.path === '/' ? menuStore.getHomePath() : recoveredPath
       }
       if (to.path === '/') return menuStore.getHomePath()
+      if (to.query._bff_auth_retry) return recoveredPath
       return true
     } catch {
+      if (to.query._bff_auth_retry === '1') {
+        window.location.replace(
+          '/auth/login?' +
+            new URLSearchParams({ error: 'login_unavailable', returnTo: recoveredPath })
+        )
+        return false
+      }
       window.location.replace(
-        '/api/auth/login?' + new URLSearchParams({ returnTo: to.fullPath, restart: '1' })
+        '/api/auth/login?' +
+          new URLSearchParams({
+            returnTo: router.resolve({
+              path: to.path,
+              query: { ...to.query, _bff_auth_retry: '1' },
+              hash: to.hash
+            }).fullPath,
+            restart: '1'
+          })
       )
       return false
     }

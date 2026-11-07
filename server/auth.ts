@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import * as oidc from 'openid-client'
+import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 import { config, authReady } from './config'
 import { oidcIdentityFetch } from './identity-http'
 import { remoteFetch } from './remote-http'
@@ -296,28 +297,63 @@ async function refresh(row: SessionRow, tokens: Tokens): Promise<Tokens> {
   }
 }
 
+export function sessionSnapshot(value: unknown): { row: SessionRow; member: Member } {
+  if (
+    !isObjectRecord(value) ||
+    typeof value.token_hash !== 'string' ||
+    typeof value.member_id !== 'string' ||
+    typeof value.payload !== 'string' ||
+    typeof value.csrf_token !== 'string' ||
+    typeof value.expires_at !== 'string'
+  )
+    throw new HttpError(503, '登录状态暂时无法读取，请稍后重试')
+  const member = value.member
+  if (!isObjectRecord(member) || member.enabled !== true || member.issuer !== config.issuer)
+    throw new HttpError(403, '平台访问权限已停用', 'ACCESS_NOT_GRANTED')
+  if (
+    member.id !== value.member_id ||
+    typeof member.id !== 'string' ||
+    typeof member.subject !== 'string' ||
+    typeof member.tenant_id !== 'string' ||
+    typeof member.display_name !== 'string' ||
+    typeof member.email !== 'string' ||
+    (member.role !== 'admin' && member.role !== 'viewer')
+  )
+    throw new HttpError(503, '平台访问权限暂时无法读取，请稍后重试')
+  return {
+    row: {
+      token_hash: value.token_hash,
+      member_id: value.member_id,
+      payload: value.payload,
+      csrf_token: value.csrf_token,
+      expires_at: value.expires_at
+    },
+    member: {
+      id: member.id,
+      issuer: config.issuer,
+      subject: member.subject,
+      tenant_id: member.tenant_id,
+      display_name: member.display_name,
+      email: member.email,
+      role: member.role,
+      enabled: true
+    }
+  }
+}
 export async function authenticate(req: IncomingMessage): Promise<Session> {
   const token = cookie(req, 'bff_session')
   if (!token) throw new HttpError(401, '请先登录', 'UNAUTHENTICATED')
   const sessionResult = await database
     .from('bff_sessions')
-    .select('*')
+    .select(
+      'token_hash,member_id,payload,csrf_token,expires_at,member:bff_members(id,issuer,subject,tenant_id,display_name,email,role,enabled)'
+    )
     .eq('token_hash', digest(token))
     .gt('expires_at', new Date().toISOString())
     .maybeSingle()
   if (sessionResult.error) throw new Error('登录状态检查失败', { cause: sessionResult.error })
-  const row = sessionResult.data as SessionRow | null
-  if (!row) throw new HttpError(401, '登录已过期，请重新登录', 'UNAUTHENTICATED')
-  const memberResult = await database
-    .from('bff_members')
-    .select('*')
-    .eq('id', row.member_id)
-    .eq('enabled', true)
-    .maybeSingle()
-  if (memberResult.error) throw new Error('平台访问权限检查失败', { cause: memberResult.error })
-  const member = memberResult.data as Member | null
-  if (!member || member.issuer !== config.issuer)
-    throw new HttpError(403, '平台访问权限已停用', 'ACCESS_NOT_GRANTED')
+  if (!sessionResult.data) throw new HttpError(401, '登录已过期，请重新登录', 'UNAUTHENTICATED')
+  const { row, member } = sessionSnapshot(sessionResult.data)
   let tokens = parseTokens(unseal(row.payload, config.sessionKey))
   if (tokens.subject !== member.subject) throw new HttpError(401, '登录身份不匹配')
   if (tokens.expiresAt < Date.now() + 60000) tokens = await refresh(row, tokens)

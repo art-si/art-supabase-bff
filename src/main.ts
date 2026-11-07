@@ -1,7 +1,11 @@
 import App from '@/App.vue'
 import { bootstrapRuntime } from '@/bootstrap-runtime'
+import { useWebsiteConfig } from '@/hooks/core/useWebsiteConfig'
 import { bffSession, signOut } from '@bff/api/bff'
 import { initRouter } from '@bff/router'
+import { createBffWebsiteDefaults } from '@bff/config/branding'
+
+useWebsiteConfig().setWebsiteConfig(createBffWebsiteDefaults())
 
 bootstrapRuntime({
   rootComponent: App,
