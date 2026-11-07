@@ -1,5 +1,5 @@
 import type { App, Component } from 'vue'
-import { watch } from 'vue'
+import { nextTick, watch } from 'vue'
 import { omit } from 'lodash-es'
 import { createRouter, createWebHistory } from 'vue-router'
 import { RouteRegistry } from '@/router/core/route-registry'
@@ -9,6 +9,7 @@ import { useMenuStore } from '@/store/modules/menu'
 import { useWorktabStore } from '@/store/modules/worktab'
 import { useUserStore } from '@/store/modules/user'
 import { notifyFriendlyError } from '@/hooks/core/useArtFeedback'
+import { loadingService } from '@/utils/ui/loading'
 import { bffSession, loadSession } from '@bff/api/bff'
 
 export const HOME_PAGE_PATH = '/applications'
@@ -72,6 +73,7 @@ export function initRouter(app: App<Element>): void {
     useWorktabStore().clearAll()
   })
   router.beforeEach(async (to) => {
+    if (!registry.isRegistered()) loadingService.showLoading('正在打开工作空间')
     if (to.path === '/auth/login') {
       const query = new URLSearchParams({
         returnTo: typeof to.query.returnTo === 'string' ? to.query.returnTo : '/applications'
@@ -139,5 +141,9 @@ export function initRouter(app: App<Element>): void {
     }
   })
   setupAfterEachGuard(router)
+  router.afterEach((_to, _from, failure) => {
+    if (!failure) void nextTick(() => loadingService.hideLoading())
+  })
+  router.onError(() => loadingService.hideLoading())
   app.use(router)
 }
