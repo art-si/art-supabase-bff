@@ -1,7 +1,51 @@
 import TreeUtils from '@/utils/tree'
 import type { QueryResult } from '@/types/api/response'
-import { call } from '@bff/api/bff'
+import { bffSession, call } from '@bff/api/bff'
+import type { ResourceCapabilities } from 'art-supabase-pro/src/api/data-center'
 export * from 'art-supabase-pro/src/api/data-center'
+
+/** Standard resource capabilities are scoped to the authenticated BFF session. */
+export async function fetchResourceCapabilities(): Promise<ResourceCapabilities> {
+  const permissions = bffSession.value?.permissions ?? []
+  return {
+    canView: permissions.includes('BffResource:View'),
+    canUpload: permissions.includes('BffResource:Add'),
+    canRename: permissions.includes('BffResource:Edit'),
+    canDelete: permissions.includes('BffResource:Delete')
+  }
+}
+
+type Resource = Api.DataCenter.Resources.ResourceListItem & { version: number }
+
+/** The shared resource workspace reads BFF-owned metadata through the server session. */
+export async function fetchResourceList(
+  params: Api.DataCenter.Resources.ResourceSearchParams & { tenantId?: string }
+) {
+  const query = new URLSearchParams({
+    from: String(params.from ?? 0),
+    to: String(params.to ?? 9),
+    originName: params.originName ?? '',
+    suffix: params.suffix ?? ''
+  })
+  const result = await call<{ data: Resource[]; total: number }>(`/api/resources?${query}`)
+  return { ...result, error: null }
+}
+
+export function renameResource(params: { id: string; originName: string; version?: number }) {
+  return call(`/api/resources/${encodeURIComponent(params.id)}/name`, {
+    method: 'PUT',
+    body: JSON.stringify({ originName: params.originName, version: params.version })
+  })
+}
+
+export function deleteResource(
+  params: Api.DataCenter.Resources.ResourceListItem & { version?: number }
+) {
+  return call<{ storageCleanupFailed: boolean }>(`/api/resources/${params.id}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ version: params.version })
+  })
+}
 
 type Dictionary = Api.DataCenter.DictListItem & { dictTypeTable: { name: string; code: string } }
 interface Snapshot {

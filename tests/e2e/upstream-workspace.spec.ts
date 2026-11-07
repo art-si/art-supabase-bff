@@ -1,3 +1,4 @@
+import { dictionarySnapshot } from '../fixtures/dictionaries'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
@@ -131,7 +132,7 @@ async function mockUpstreamApi(
       return
     }
     if (url.pathname === '/api/control/dictionaries' && method === 'GET') {
-      await reply({ revision: 1, types: [], items: [] })
+      await reply(dictionarySnapshot())
       return
     }
     if (url.pathname === '/api/control/table-columns' && method === 'GET') {
@@ -337,11 +338,25 @@ test('draft creation, metadata edit and write-only credential rotation', async (
   await page.getByRole('button', { name: '登记上游服务' }).click()
   const createDialog = page.getByRole('dialog', { name: '登记上游服务' })
   await expect(createDialog).toBeVisible()
+  await createDialog.getByRole('tab', { name: '认证与凭据' }).click()
+  await createDialog.getByRole('button', { name: '创建草稿' }).click()
+  await expect(createDialog.getByRole('tab', { name: '服务身份' })).toHaveAttribute(
+    'aria-selected',
+    'true'
+  )
+  await expect(createDialog.getByText('请输入服务编码', { exact: true })).toBeVisible()
   await createDialog.getByPlaceholder('例如：inventory-api').fill('quality-analytics')
   await createDialog.getByPlaceholder('例如：库存查询服务').fill('验收示例：质量分析服务')
+  await createDialog.getByRole('button', { name: '创建草稿' }).click()
+  await expect(createDialog.getByRole('tab', { name: '连接配置' })).toHaveAttribute(
+    'aria-selected',
+    'true'
+  )
+  await expect(createDialog.getByText('请输入上游服务地址', { exact: true })).toBeVisible()
   await createDialog
     .getByPlaceholder('https://api.example.com/v1')
     .fill('https://quality.example.test/v1')
+  await createDialog.getByRole('tab', { name: '认证与凭据' }).click()
   await createDialog.getByText('Bearer Token', { exact: true }).click()
   await createDialog
     .getByPlaceholder('可先留空创建草稿，稍后单独配置凭据')

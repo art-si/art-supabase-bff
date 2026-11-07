@@ -60,7 +60,7 @@
                 plain
                 :disabled="form.definition.inputs.length >= 32"
                 @click="addInput"
-                >新增输入</ElButton
+                ><ArtSvgIcon icon="ri:add-line" />新增输入</ElButton
               >
             </div>
             <p v-if="!form.definition.inputs.length" class="text-sm text-g-700"
@@ -73,7 +73,9 @@
               preserve-content-structure
             >
               <template #actions>
-                <ElButton link type="danger" @click="removeInput(index)">移除</ElButton>
+                <ElButton link type="danger" @click="removeInput(index)"
+                  ><ArtSvgIcon icon="ri:delete-bin-line" />移除</ElButton
+                >
               </template>
               <ArtForm
                 v-model="form.definition.inputs[index]"
@@ -98,7 +100,7 @@
                 :disabled="form.definition.steps.length >= 8"
                 @click="addStep"
               >
-                新增步骤
+                <ArtSvgIcon icon="ri:add-line" />新增步骤
               </ElButton>
             </div>
             <ElAlert
@@ -118,20 +120,20 @@
               <template #actions>
                 <div class="flex items-center gap-1">
                   <ElButton link :disabled="index === 0" @click="moveStep(index, -1)"
-                    >上移</ElButton
+                    ><ArtSvgIcon icon="ri:arrow-up-line" />上移</ElButton
                   >
                   <ElButton
                     link
                     :disabled="index === form.definition.steps.length - 1"
                     @click="moveStep(index, 1)"
-                    >下移</ElButton
+                    ><ArtSvgIcon icon="ri:arrow-down-line" />下移</ElButton
                   >
                   <ElButton
                     link
                     type="danger"
                     :disabled="form.definition.steps.length <= 1"
                     @click="removeStep(index)"
-                    >移除</ElButton
+                    ><ArtSvgIcon icon="ri:delete-bin-line" />移除</ElButton
                   >
                 </div>
               </template>
@@ -156,7 +158,7 @@
                     link
                     type="primary"
                     @click="step.configVersion = latestConfigVersion(step.upstreamId)"
-                    >使用最新配置</ElButton
+                    ><ArtSvgIcon icon="ri:refresh-line" />使用最新配置</ElButton
                   >
                 </p>
                 <BindingEditor
@@ -206,6 +208,13 @@
 </template>
 
 <script setup lang="ts">
+  import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
+  const environmentOptions = useDictionaryOptions(BFF_DICTIONARIES.common.environment)
+  const methodOptions = useDictionaryOptions(BFF_DICTIONARIES.interfaces.method)
+  const inputLocationOptions = useDictionaryOptions(BFF_DICTIONARIES.interfaces.inputLocation)
+  const valueTypeOptions = useDictionaryOptions(BFF_DICTIONARIES.interfaces.valueType)
+  const upstreamStatusOptions = useDictionaryOptions(BFF_DICTIONARIES.upstreams.status)
   import type { FormRules } from 'element-plus'
   import { validateArtFormForSubmit } from '@/utils/form/validate-art-form'
   import type ArtForm from '@/components/core/forms/art-form/index.vue'
@@ -217,7 +226,6 @@
   import { createInterface, updateInterface } from '@bff/api/interfaces'
   import type {
     InterfaceBinding,
-    InterfaceMethod,
     InterfaceOptions,
     InterfaceRecord,
     InterfaceWriteInput
@@ -234,8 +242,6 @@
   const optionsPending = ref(false)
   const optionsLoadError = ref('')
   const saveError = ref('')
-  const methods: InterfaceMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
-  const upstreamStatusText = { draft: '草稿', active: '已启用', disabled: '已停用' } as const
   const keyPattern = /^[A-Za-z][A-Za-z0-9_]{0,39}$/
 
   function newBinding(
@@ -357,7 +363,7 @@
       span: 12,
       props: {
         disabled: Boolean(record.value),
-        options: options.value?.environments ?? [],
+        options: environmentOptions,
         onChange: resetUpstreamSelection
       }
     },
@@ -380,7 +386,7 @@
       label: '对外方法',
       type: 'select',
       span: 12,
-      props: { options: methods.map((method) => ({ label: method, value: method })) }
+      props: { options: methodOptions }
     },
     {
       key: 'path',
@@ -429,11 +435,7 @@
         span: 12,
         props: {
           'aria-label': `${label} 位置`,
-          options: [
-            { label: '路径参数', value: 'path' },
-            { label: '查询参数', value: 'query' },
-            { label: '请求体', value: 'body' }
-          ]
+          options: inputLocationOptions
         }
       },
       {
@@ -443,11 +445,7 @@
         span: 12,
         props: {
           'aria-label': `${label} 类型`,
-          options: [
-            { label: '文本', value: 'string' },
-            { label: '数字', value: 'number' },
-            { label: '布尔值', value: 'boolean' }
-          ]
+          options: valueTypeOptions
         }
       },
       {
@@ -487,7 +485,7 @@
           placeholder: '选择同应用、同环境的上游',
           'aria-label': `${label} 上游服务`,
           options: availableUpstreams.value.map((item) => ({
-            label: `${item.name}（${item.code} · 配置 v${item.configVersion} · ${upstreamStatusText[item.status]}）`,
+            label: `${item.name}（${item.code} · 配置 v${item.configVersion} · ${upstreamStatusOptions.find((option) => option.value === item.status)?.label ?? '状态待核对'}）`,
             value: item.id
           })),
           onChange: (value: unknown) => selectUpstream(index, value)
@@ -500,7 +498,7 @@
         span: 12,
         props: {
           'aria-label': `${label} 请求方法`,
-          options: methods.map((method) => ({ label: method, value: method })),
+          options: methodOptions,
           onChange: () => handleStepMethod(index)
         }
       },

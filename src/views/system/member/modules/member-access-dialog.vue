@@ -29,13 +29,20 @@
 
 <script setup lang="ts">
   import { ElMessage } from 'element-plus'
+  import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
   import { useArtFeedback } from '@/hooks/core/useArtFeedback'
   import type { FormItem } from '@/components/core/forms/art-form/index.vue'
   import type { ArtDialogExpose } from '@/components/core/dialogs/art-dialog/types'
   import { BffApiError, bffSession } from '@bff/api/bff'
   import { updateMemberAccess } from '@bff/api/members'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
   import type { MemberBaseRole, MemberRecord, MemberSnapshot } from '@bff/types/member'
 
+  const enabledOptions = useDictionaryOptions(
+    BFF_DICTIONARIES.members.accessStatus,
+    (value) => value === 'enabled'
+  )
+  const roleOptions = useDictionaryOptions(BFF_DICTIONARIES.members.role)
   const emit = defineEmits<{ success: [snapshot: MemberSnapshot] }>()
   const { confirmAction } = useArtFeedback()
   const dialogRef = ref<ArtDialogExpose<MemberRecord>>()
@@ -66,10 +73,7 @@
       label: '平台访问状态',
       type: 'segment',
       span: 24,
-      options: [
-        { label: '启用', value: true },
-        { label: '停用', value: false }
-      ],
+      options: enabledOptions,
       props: { disabled: saving.value },
       description:
         member.value?.role === 'admin' && !form.value.enabled && form.value.role === 'admin'
@@ -83,10 +87,7 @@
       label: '平台身份',
       type: 'segment',
       span: 24,
-      options: [
-        { label: '普通成员', value: 'viewer' },
-        { label: '平台管理员', value: 'admin' }
-      ],
+      options: roleOptions,
       props: { disabled: saving.value || !isBaseAdmin.value },
       description: !isBaseAdmin.value
         ? '平台身份只能由当前租户的管理员调整。业务角色在角色管理中单独分配。'

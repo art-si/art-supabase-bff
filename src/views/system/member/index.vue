@@ -25,6 +25,8 @@
         :api-fn="loadMembers"
         :columns-factory="columnsFactory"
         :search-items="searchItems"
+        :header-actions="headerActions"
+        header-actions-placement="workspace"
         :enable-cache="false"
         :search-bar-props="{ showExpand: false, span: 8 }"
         :table-header-props="{ layout: 'refresh,size' }"
@@ -32,7 +34,7 @@
           rowKey: 'id',
           stripe: false,
           emptyText: '暂无符合条件的成员',
-          emptyDescription: '可调整筛选条件；新成员需先完成统一账号核验和平台开通。'
+          emptyDescription: '可调整筛选条件；管理员可通过“开通成员”添加已有统一账号。'
         }"
       >
         <template #header-left>
@@ -48,6 +50,7 @@
     </div>
 
     <MemberAccessDialog ref="accessDialogRef" @success="handleSaved" />
+    <MemberProvisionDialog ref="provisionDialogRef" @success="handleSaved" />
   </div>
 </template>
 
@@ -62,11 +65,15 @@
   import { formatWithDayjs } from '@/utils/time'
   import type { ColumnOption } from '@/types'
   import type { SearchFormItem } from '@/components/core/forms/art-search-bar/index.vue'
-  import type { ArtTableQueryExpose } from '@/components/core/tables/art-table-query/index.vue'
+  import type {
+    ArtTableQueryExpose,
+    ArtTableQueryHeaderAction
+  } from '@/components/core/tables/art-table-query/index.vue'
   import { bffSession } from '@bff/api/bff'
   import { fetchMembers } from '@bff/api/members'
   import type { MemberRecord, MemberSnapshot } from '@bff/types/member'
   import MemberAccessDialog from './modules/member-access-dialog.vue'
+  import MemberProvisionDialog from './modules/member-provision-dialog.vue'
 
   defineOptions({ name: 'User' })
 
@@ -75,8 +82,20 @@
   const { hasAuth } = useAuth()
   const tableQueryRef = ref<ArtTableQueryExpose>()
   const accessDialogRef = ref<InstanceType<typeof MemberAccessDialog>>()
+  const provisionDialogRef = ref<InstanceType<typeof MemberProvisionDialog>>()
   const snapshot = shallowRef<MemberSnapshot>({ revision: 0, records: [] })
   const loaded = ref(false)
+  const headerActions = computed<ArtTableQueryHeaderAction[]>(() => [
+    {
+      type: 'add',
+      label: '开通成员',
+      icon: 'ri:user-add-line',
+      permission: 'System:Member:Add',
+      hidden: bffSession.value?.user.role !== 'admin',
+      disabled: !loaded.value,
+      onClick: () => provisionDialogRef.value?.handleOpen(snapshot.value.revision)
+    }
+  ])
   const showSearchBar = ref(true)
   const filters = ref({ keyword: '', status: '', role: '' })
   const locatedMemberId = computed(() =>

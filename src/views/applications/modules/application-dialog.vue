@@ -17,6 +17,12 @@
   /></ArtDialog>
 </template>
 <script setup lang="ts">
+  import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
+  const enabledOptions = useDictionaryOptions(
+    BFF_DICTIONARIES.applications.status,
+    (value) => value === 'true'
+  )
   import { saveApplication, BffApiError } from '@bff/api/bff'
   import type { ApplicationInput, BffApplication } from '@bff/types/bff'
   import type { FormItem } from '@/components/core/forms/art-form/index.vue'
@@ -126,10 +132,7 @@
         label: '应用状态',
         type: 'segment',
         span: 24,
-        options: [
-          { label: '启用', value: true },
-          { label: '停用', value: false }
-        ],
+        options: enabledOptions,
         description: '停用后，普通成员将无法在应用列表中访问此应用。'
       },
       {

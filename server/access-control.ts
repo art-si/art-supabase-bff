@@ -12,6 +12,12 @@ function selection(value: unknown): string[] {
 }
 function definition(value: unknown): Record<string, unknown> {
   if (!isObjectRecord(value)) throw new HttpError(400, '角色内容格式有误')
+  if (
+    value.organizationId !== undefined &&
+    value.organizationId !== null &&
+    value.organizationId !== ''
+  )
+    throw new HttpError(400, '当前工作空间尚无可分配的组织')
   const roleCode = text(value.roleCode, '角色编码', 100, true)
   if (!/^[A-Za-z][A-Za-z0-9_:-]{0,99}$/.test(roleCode))
     throw new HttpError(400, '角色编码需以字母开头，仅包含字母、数字、冒号、下划线或连字符')

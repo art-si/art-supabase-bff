@@ -34,12 +34,11 @@
       :closable="false"
       show-icon
     />
-    <div class="interface-page__workspace min-h-0 flex-1">
+    <div class="interface-page__workspace business-workspace-content flex min-w-0 flex-col">
       <ArtTableQuery
         ref="tableQueryRef"
         v-model="filters"
         v-model:show-search-bar="showSearchBar"
-        class="h-full"
         focusable
         focus-scope-selector=".interface-page__workspace"
         :api-fn="loadInterfaces"
@@ -57,7 +56,7 @@
           emptyDescription: '可调整筛选条件，或新增接口草稿开始配置。'
         }"
       >
-        <template #header-left>
+        <template v-if="locatedRecordId" #header-left>
           <div v-if="locatedRecordId" class="flex min-w-0 items-center gap-2" aria-live="polite">
             <ElTag type="primary" effect="plain" round>定位接口</ElTag>
             <span class="max-w-48 truncate text-xs text-g-700" :title="locatedRecordLabel">{{
@@ -75,6 +74,11 @@
 </template>
 
 <script setup lang="tsx">
+  import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
+  import ArtDictDisplay from '@/components/core/base/art-dict-display/index.vue'
+  const environmentOptions = useDictionaryOptions(BFF_DICTIONARIES.common.environment)
+  const validationStatusOptions = useDictionaryOptions(BFF_DICTIONARIES.interfaces.validationStatus)
   import { ElButton, ElMessage, ElTag } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { notifyFriendlyError } from '@/hooks/core/useArtFeedback'
@@ -213,7 +217,7 @@
       props: {
         placeholder: '全部环境',
         clearable: true,
-        options: options.value?.environments ?? []
+        options: environmentOptions
       }
     },
     {
@@ -223,11 +227,7 @@
       props: {
         placeholder: '全部状态',
         clearable: true,
-        options: [
-          { label: '待验证', value: 'unvalidated' },
-          { label: '已通过', value: 'valid' },
-          { label: '未通过', value: 'invalid' }
-        ]
+        options: validationStatusOptions
       }
     }
   ])
@@ -407,9 +407,7 @@
     if (item.key === 'delete') void handleDelete(row)
   }
   const environmentLabel = (value: InterfaceRecord['environment']): string =>
-    options.value?.environments.find((item) => item.value === value)?.label ??
-    { development: '开发', staging: '预发布', production: '生产' }[value]
-  const validationText = { unvalidated: '待验证', valid: '已通过', invalid: '未通过' } as const
+    environmentOptions.find((item) => item.value === value)?.label ?? '环境待核对'
   const testText = {
     not_tested: '未测试',
     passed: '测试通过',
@@ -474,19 +472,11 @@
         minWidth: 120,
         formatter: (row) => (
           <span title={row.validationIssues.join('；') || undefined}>
-            <ElTag
-              type={
-                row.validationStatus === 'valid'
-                  ? 'success'
-                  : row.validationStatus === 'invalid'
-                    ? 'danger'
-                    : 'info'
-              }
-              effect="light"
-              round
-            >
-              {validationText[row.validationStatus]}
-            </ElTag>
+            <ArtDictDisplay
+              dictCode={BFF_DICTIONARIES.interfaces.validationStatus}
+              value={row.validationStatus}
+              display="tag"
+            />
           </span>
         )
       },

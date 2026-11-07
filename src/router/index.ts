@@ -22,6 +22,7 @@ registerApplicationViewModules('shared', '/shared', {
   '/shared/system/menu.vue': () => import('@/views/system/menu/index.vue'),
   '/shared/system/role.vue': () => import('@/views/system/role/index.vue'),
   '/shared/system/website-config.vue': () => import('@/views/system/website-config/index.vue'),
+  '/shared/data-center/attachment.vue': () => import('@/views/data-center/attachment/index.vue'),
   '/shared/data-center/dict.vue': () => import('@/views/data-center/dict/index.vue')
 })
 

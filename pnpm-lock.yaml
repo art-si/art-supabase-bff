@@ -176,14 +176,17 @@ importers:
         specifier: ^15.0.0
         version: 15.0.0(vue@3.5.43(typescript@6.0.3))
       art-supabase-pro:
-        specifier: https://gitee.com/art-si/art-supabase-pro/repository/archive/f8b1b5a69ef5bc16cfe01ca83dce1f5feedcc06a.tar.gz
-        version: https://gitee.com/art-si/art-supabase-pro/repository/archive/f8b1b5a69ef5bc16cfe01ca83dce1f5feedcc06a.tar.gz(@floating-ui/dom@1.8.0)(@nuxt/kit@4.4.8)(@tiptap/extension-list@3.31.4(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4))(@tiptap/extensions@3.31.4(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4)(@types/sortablejs@1.15.9)(@vue/compiler-sfc@3.5.43)(antlr4ng-cli@1.0.7)(core-js@3.49.0)(debug@4.4.3(supports-color@10.2.2))(pdf-lib@1.17.1)(rolldown@1.2.12)(snappyjs@0.7.0)(supports-color@10.2.2)(typescript@6.0.3)(vite@8.3.4(@types/node@26.6.5)(jiti@2.7.0)(sass-embedded@1.105.1)(sass@1.105.1)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
+        specifier: https://gitee.com/art-si/art-supabase-pro/repository/archive/0f1bd209a3b0214d889376411c40dab7536de7c1.tar.gz
+        version: https://gitee.com/art-si/art-supabase-pro/repository/archive/0f1bd209a3b0214d889376411c40dab7536de7c1.tar.gz(@floating-ui/dom@1.8.0)(@nuxt/kit@4.4.8)(@tiptap/extension-list@3.31.4(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4))(@tiptap/extensions@3.31.4(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4)(@types/sortablejs@1.15.9)(@vue/compiler-sfc@3.5.43)(antlr4ng-cli@1.0.7)(core-js@3.49.0)(debug@4.4.3(supports-color@10.2.2))(pdf-lib@1.17.1)(rolldown@1.2.12)(snappyjs@0.7.0)(supports-color@10.2.2)(typescript@6.0.3)(vite@8.3.4(@types/node@26.6.5)(jiti@2.7.0)(sass-embedded@1.105.1)(sass@1.105.1)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
       dayjs:
         specifier: ^1.11.23
         version: 1.11.23
       element-plus:
         specifier: ^2.14.7
         version: 2.14.7(vue@3.5.43(typescript@6.0.3))
+      file-type:
+        specifier: 22.3.0
+        version: 22.3.0(supports-color@10.2.2)
       jose:
         specifier: 6.2.15
         version: 6.2.15
@@ -444,6 +447,9 @@ packages:
   '@babel/types@8.0.4':
     resolution: {integrity: sha512-eY+Yn3dCqTGmyiq2QRU66lA5FL8lqqqvecHt0fF3uHONIa7ToYsaCiWV8lOKqAs0Rb2SjixiKFROngnulPtt2g==}
     engines: {node: ^22.18.0 || >=24.11.0}
+
+  '@borewit/text-codec@0.2.3':
+    resolution: {integrity: sha512-49CycTz1aAZmvFcwkeFyhud1HUmRIB5Tabf7ALV+VA4Iu85MTfz2cUwzPagMFAdVBvrWdkCxG67I30tUwwpKsw==}
 
   '@braintree/sanitize-url@7.1.2':
     resolution: {integrity: sha512-jigsZK+sMF/cuiB7sERuo9V7N9jx+dhmHHnQyDSVdpZwVutaBu7WvNYqMDLSgFgfB30n452TP3vjDAvFC973mA==}
@@ -1759,6 +1765,13 @@ packages:
   '@tmcw/togeojson@7.1.2':
     resolution: {integrity: sha512-QKnFs9DAuqqBVj4d6c69tV1Dj2TspSBTqffivoN0YoBCVdP/JY1+WaYCJbzU49RkoU5NOSOJ3jtFHCdEUVh21A==}
 
+  '@tokenizer/inflate@0.6.0':
+    resolution: {integrity: sha512-+0RDxhBkyT9xMnGdJAwmats9yxRLR8ypJrQgrnLqOu4Gv/aHlnxYgdGVy2QTwvBl6IF/w2Hr+ZNirH+iMUbVZA==}
+    engines: {node: '>=18'}
+
+  '@tokenizer/token@0.3.0':
+    resolution: {integrity: sha512-OvjF+z51L3ov0OyAU0duzsYuvO01PH7x4t6DJx+guahgTnBHkhJdG7soQeTSFLWN3efnHyibZ4Z8l2EuWwJN3A==}
+
   '@tonejs/midi@2.0.28':
     resolution: {integrity: sha512-RII6YpInPsOZ5t3Si/20QKpNqB1lZ2OCFJSOzJxz38YdY/3zqDr3uaml4JuCWkdixuPqP1/TBnXzhQ39csyoVg==}
 
@@ -2201,9 +2214,9 @@ packages:
   array-flatten@3.0.0:
     resolution: {integrity: sha512-zPMVc3ZYlGLNk4mpK1NzP2wg0ml9t7fUgDsayR5Y5rSzxQilzR9FGu/EH2jQOcKSAeAfWeylyW8juy3OkWRvNA==}
 
-  art-supabase-pro@https://gitee.com/art-si/art-supabase-pro/repository/archive/f8b1b5a69ef5bc16cfe01ca83dce1f5feedcc06a.tar.gz:
-    resolution: {integrity: sha512-jFKxpjLMOL1DCFgEIcDSzSQqNo516hzIiLd/H0kg0Xdmf8fnfoBF3AxAvQsDpmysuVf/WT9VgKPn8o4dNtjH6A==, tarball: https://gitee.com/art-si/art-supabase-pro/repository/archive/f8b1b5a69ef5bc16cfe01ca83dce1f5feedcc06a.tar.gz}
-    version: 1.0.0
+  art-supabase-pro@https://gitee.com/art-si/art-supabase-pro/repository/archive/0f1bd209a3b0214d889376411c40dab7536de7c1.tar.gz:
+    resolution: {integrity: sha512-2CpYFWBTz2p9q4nxzoEmGhdOrRNeYNMv6hpIviEhY2VloL5GWj1zeOeLh8Zp5sOVVvT/JFlZE7Hdi8lA4L/CMg==, tarball: https://gitee.com/art-si/art-supabase-pro/repository/archive/0f1bd209a3b0214d889376411c40dab7536de7c1.tar.gz}
+    version: 1.0.1
     engines: {node: '>=22.13.0', pnpm: '>=11.28.2'}
 
   ast-kit@2.1.2:
@@ -3056,6 +3069,10 @@ packages:
 
   file-saver@2.0.5:
     resolution: {integrity: sha512-P9bmyZ3h/PRG+Nzga+rbdI4OEpNDzAVyy74uVO9ATgzLK6VtAsYybF/+TOCvrc0MO793d6+42lLyZTw7/ArVzA==}
+
+  file-type@22.3.0:
+    resolution: {integrity: sha512-PrPedgnnWl5bWz3JHgar0QSzRvzeyFh7dZ9JpYOgcPZu4KALS9zw4MMa6qXRYyjeBsAlpaWB2boLuG991+0HIQ==}
+    engines: {node: '>=22'}
 
   fill-range@7.1.1:
     resolution: {integrity: sha512-YsGpe3WHLK8ZYi4tWDg2Jy3ebRz2rXowDxnld4bkQB00cc/1Zw9AWnC0i9ztDJitivtQvaI9KaLyKrc+hBW0yg==}
@@ -4561,6 +4578,10 @@ packages:
   strnum@2.4.2:
     resolution: {integrity: sha512-rDG3Ah4TV0k1hWvLSzkZtMmLN9+eS+h3knq4MP6A42Y3Yh5qGNnOUs1jJkoSr8FG5dsL28c7KgkIBzSEykqtuw==}
 
+  strtok3@10.7.0:
+    resolution: {integrity: sha512-iAqrCpp7UXD2FZiHWhLXqdJ6CmNeVzRkkHAyyhhKMVtbVm2KtPX3D/bJNonvtcyLTHS4rwqP2pz9fsjK1K4z0Q==}
+    engines: {node: '>=18'}
+
   styled-exceljs@0.21.6:
     resolution: {integrity: sha512-n3lHSH5rKn7wlu6+rBIv1/anXDDJd1+IAWI60iCfXW9QlYRDHQDEN6P2Vq9b/6TxT+hUiLTNFy9Hoo0TGk5t8g==}
     engines: {node: '>=0.8'}
@@ -4714,6 +4735,10 @@ packages:
     resolution: {integrity: sha512-65P7iz6X5yEr1cwcgvQxbbIw7Uk3gOy5dIdtZ4rDveLqhrdJP+Li/Hx6tyK0NEb+2GCyneCMJiGqrADCSNk8sQ==}
     engines: {node: '>=8.0'}
 
+  token-types@6.2.0:
+    resolution: {integrity: sha512-s9euYHM//T3loJtbNUYdbAzsMlvKBeRS+XCLFy+UGosMQH19Hwjap5k19i4PPAEJJBsVIpMpVTxl4fIqCuNfUg==}
+    engines: {node: '>=14.16'}
+
   tr46@0.0.3:
     resolution: {integrity: sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==}
 
@@ -4765,6 +4790,10 @@ packages:
 
   ufo@1.6.4:
     resolution: {integrity: sha512-JFNbkD1Svwe0KvGi8GOeLcP4kAWQ609twvCdcHxq1oSL8svv39ZuSvajcD8B+5D0eL4+s1Is2D/O6KN3qcTeRA==}
+
+  uint8array-extras@1.6.0:
+    resolution: {integrity: sha512-8iAasVS4wUx0gPLjH8Xtz2PeDzTSiy8QiLGu2DT3X5GU+egFEQhpnbtkehbAwjvDcxIERmCYcysiODFmE3Ud0Q==}
+    engines: {node: '>=18'}
 
   unctx@2.5.0:
     resolution: {integrity: sha512-p+Rz9x0R7X+CYDkT+Xg8/GhpcShTlU8n+cf9OtOEf7zEQsNcCZO1dPKNRDqvUTaq+P32PMMkxWHwfrxkqfqAYg==}
@@ -5329,6 +5358,8 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 8.0.0
       '@babel/helper-validator-identifier': 8.0.4
+
+  '@borewit/text-codec@0.2.3': {}
 
   '@braintree/sanitize-url@7.1.2': {}
 
@@ -6611,6 +6642,16 @@ snapshots:
 
   '@tmcw/togeojson@7.1.2': {}
 
+  '@tokenizer/inflate@0.6.0(supports-color@10.2.2)':
+    dependencies:
+      debug: 4.4.3(supports-color@10.2.2)
+      strtok3: 10.7.0
+      token-types: 6.2.0
+    transitivePeerDependencies:
+      - supports-color
+
+  '@tokenizer/token@0.3.0': {}
+
   '@tonejs/midi@2.0.28':
     dependencies:
       array-flatten: 3.0.0
@@ -7180,7 +7221,7 @@ snapshots:
 
   array-flatten@3.0.0: {}
 
-  art-supabase-pro@https://gitee.com/art-si/art-supabase-pro/repository/archive/f8b1b5a69ef5bc16cfe01ca83dce1f5feedcc06a.tar.gz(@floating-ui/dom@1.8.0)(@nuxt/kit@4.4.8)(@tiptap/extension-list@3.31.4(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4))(@tiptap/extensions@3.31.4(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4)(@types/sortablejs@1.15.9)(@vue/compiler-sfc@3.5.43)(antlr4ng-cli@1.0.7)(core-js@3.49.0)(debug@4.4.3(supports-color@10.2.2))(pdf-lib@1.17.1)(rolldown@1.2.12)(snappyjs@0.7.0)(supports-color@10.2.2)(typescript@6.0.3)(vite@8.3.4(@types/node@26.6.5)(jiti@2.7.0)(sass-embedded@1.105.1)(sass@1.105.1)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1)):
+  art-supabase-pro@https://gitee.com/art-si/art-supabase-pro/repository/archive/0f1bd209a3b0214d889376411c40dab7536de7c1.tar.gz(@floating-ui/dom@1.8.0)(@nuxt/kit@4.4.8)(@tiptap/extension-list@3.31.4(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4))(@tiptap/extensions@3.31.4(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4)(@types/sortablejs@1.15.9)(@vue/compiler-sfc@3.5.43)(antlr4ng-cli@1.0.7)(core-js@3.49.0)(debug@4.4.3(supports-color@10.2.2))(pdf-lib@1.17.1)(rolldown@1.2.12)(snappyjs@0.7.0)(supports-color@10.2.2)(typescript@6.0.3)(vite@8.3.4(@types/node@26.6.5)(jiti@2.7.0)(sass-embedded@1.105.1)(sass@1.105.1)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1)):
     dependencies:
       '@cloudbase/js-sdk': 3.10.3
       '@element-plus/icons-vue': 2.3.2(vue@3.5.43(typescript@6.0.3))
@@ -8224,6 +8265,15 @@ snapshots:
       flat-cache: 6.1.23
 
   file-saver@2.0.5: {}
+
+  file-type@22.3.0(supports-color@10.2.2):
+    dependencies:
+      '@tokenizer/inflate': 0.6.0(supports-color@10.2.2)
+      strtok3: 10.7.0
+      token-types: 6.2.0
+      uint8array-extras: 1.6.0
+    transitivePeerDependencies:
+      - supports-color
 
   fill-range@7.1.1:
     dependencies:
@@ -9615,6 +9665,10 @@ snapshots:
     dependencies:
       anynum: 1.0.1
 
+  strtok3@10.7.0:
+    dependencies:
+      '@tokenizer/token': 0.3.0
+
   styled-exceljs@0.21.6: {}
 
   stylelint-config-html@2.0.0(postcss-html@2.0.0(postcss@8.5.29))(stylelint@17.16.0(supports-color@10.2.2)(typescript@6.0.3)):
@@ -9807,6 +9861,12 @@ snapshots:
     dependencies:
       is-number: 7.0.0
 
+  token-types@6.2.0:
+    dependencies:
+      '@borewit/text-codec': 0.2.3
+      '@tokenizer/token': 0.3.0
+      ieee754: 1.2.1
+
   tr46@0.0.3: {}
 
   traverse@0.3.9: {}
@@ -9849,6 +9909,8 @@ snapshots:
   typescript@6.0.3: {}
 
   ufo@1.6.4: {}
+
+  uint8array-extras@1.6.0: {}
 
   unctx@2.5.0:
     dependencies:

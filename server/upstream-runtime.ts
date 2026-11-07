@@ -4,7 +4,11 @@ import {
   decryptCredential,
   type CredentialContext
 } from './upstream-credentials'
-import { validateUpstreamPolicy, type UpstreamNetworkPolicy } from './upstream-network'
+import {
+  isSafeCredentialHeader,
+  validateUpstreamPolicy,
+  type UpstreamNetworkPolicy
+} from './upstream-network'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 import { database } from './database/client'
 import { HttpError } from './http'
@@ -38,14 +42,18 @@ export const interfaceWriteTestOrigins = config.interfaceTestWriteOrigins
 if (interfaceWriteTestOrigins.some((origin) => !upstreamPolicy.allowedOrigins.includes(origin)))
   throw new Error('写操作试运行源站必须同时列入上游网络允许范围')
 
-/** Server-only; authorize the owning application before requesting a credential. */
-export async function loadUpstreamCredential(
-  context: CredentialContext & { authType: string; headerName: string; timeoutMs?: number }
-): Promise<{ headerName: string; value: string } | undefined> {
+type RuntimeCredentialContext = CredentialContext & {
+  authType: string
+  headerName: string
+  timeoutMs?: number
+}
+
+/** Server-only encrypted metadata; authorize the owning application before reading. */
+export async function readUpstreamCredential(context: RuntimeCredentialContext): Promise<unknown> {
   if (context.authType === 'none') return undefined
   const result = await database
     .from('bff_upstream_credentials')
-    .select('ciphertext,key_id,credential_version')
+    .select('ciphertext,keyId:key_id,version:credential_version')
     .eq('service_id', context.serviceId)
     .eq('tenant_id', context.tenantId)
     .eq('application_id', context.applicationId)
@@ -53,20 +61,32 @@ export async function loadUpstreamCredential(
     .abortSignal(AbortSignal.timeout(Math.max(1, context.timeoutMs ?? 30_000)))
     .maybeSingle()
   if (result.error) throw new HttpError(503, '服务凭据暂时无法读取，请稍后重试')
-  const value: unknown = result.data
+  return result.data
+}
+
+/** One decryption/header policy for direct reads and authorized batched target snapshots. */
+export function openUpstreamCredential(
+  context: RuntimeCredentialContext,
+  value: unknown
+): { headerName: string; value: string } | undefined {
+  if (context.authType === 'none') return undefined
   if (!isObjectRecord(value)) throw new HttpError(409, '请先配置服务凭据，再启用或调用服务')
   try {
     if (
       typeof value.ciphertext !== 'string' ||
-      typeof value.key_id !== 'string' ||
-      typeof value.credential_version !== 'number'
+      typeof value.keyId !== 'string' ||
+      typeof value.version !== 'number' ||
+      value.version !== context.version ||
+      !['bearer', 'api_key_header'].includes(context.authType) ||
+      !isSafeCredentialHeader(context.headerName, context.authType === 'bearer')
     )
       throw new Error('Invalid credential record')
     const secret = decryptCredential(
-      { ciphertext: value.ciphertext, keyId: value.key_id, version: value.credential_version },
+      { ciphertext: value.ciphertext, keyId: value.keyId, version: value.version },
       context,
       upstreamKeys
     )
+    if (!/^[\x21-\x7e]{1,8192}$/.test(secret)) throw new Error('Invalid credential contents')
     return {
       headerName: context.headerName,
       value: context.authType === 'bearer' ? `Bearer ${secret}` : secret
@@ -74,4 +94,10 @@ export async function loadUpstreamCredential(
   } catch {
     throw new HttpError(503, '服务凭据暂不可用，请管理员恢复对应密钥版本或重新配置凭据')
   }
+}
+
+export async function loadUpstreamCredential(
+  context: RuntimeCredentialContext
+): Promise<{ headerName: string; value: string } | undefined> {
+  return openUpstreamCredential(context, await readUpstreamCredential(context))
 }

@@ -1,4 +1,8 @@
 import type { IncomingMessage } from 'node:http'
+import {
+  getAuthChannelValidationMessage,
+  normalizeAuthChannels
+} from 'art-supabase-pro/src/utils/supabase/auth-channels'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 import {
   BFF_BRANDING_DEFAULTS,
@@ -41,26 +45,133 @@ export function brandingInput(value: unknown): BffBrandingConfig {
     !isObjectRecord(value) ||
     Object.keys(value).some((key) => !Object.hasOwn(BFF_BRANDING_DEFAULTS, key))
   )
-    throw new HttpError(400, '品牌配置包含不支持的配置项')
-  const kind = value.watermarkContentType
-  if (
-    typeof value.watermarkEnabled !== 'boolean' ||
-    (kind !== 'username' && kind !== 'username_time' && kind !== 'site_name' && kind !== 'custom')
-  )
-    throw new HttpError(400, '请选择有效的水印设置')
-  const customText = text(value.watermarkCustomText, '自定义水印', 80)
-  if (value.watermarkEnabled && kind === 'custom' && !customText)
-    throw new HttpError(400, '请填写自定义水印内容')
-  return {
-    siteName: text(value.siteName, '系统名称', 60, true),
-    siteShortName: text(value.siteShortName, '系统简称', 40),
-    siteDescription: text(value.siteDescription, '系统说明', 255),
-    logoUrl: imageUrl(value.logoUrl),
-    faviconUrl: imageUrl(value.faviconUrl),
-    watermarkEnabled: value.watermarkEnabled,
-    watermarkContentType: kind,
-    watermarkCustomText: customText
+    throw new HttpError(400, '网站配置包含不支持的配置项')
+  const merged = { ...BFF_BRANDING_DEFAULTS, ...value }
+  const stringLimits: Record<string, number> = {
+    siteName: 60,
+    siteShortName: 40,
+    siteDescription: 255,
+    watermarkCustomText: 80,
+    loginTitle: 80,
+    loginSubtitle: 255,
+    loginDescription: 255,
+    turnstileSiteKey: 120,
+    maintenanceMessage: 160,
+    seoTitle: 80,
+    seoKeywords: 160,
+    seoDescription: 500,
+    contactEmail: 254,
+    contactPhone: 64,
+    contactAddress: 500,
+    copyrightText: 255,
+    icpRecord: 160,
+    policeRecord: 160
   }
+  const normalized = { ...merged }
+  for (const [key, max] of Object.entries(stringLimits)) {
+    const raw = merged[key as keyof BffBrandingConfig]
+    if (raw !== null && typeof raw !== 'string') throw new HttpError(400, `${key}需为文字内容`)
+    Object.assign(normalized, {
+      [key]: text(raw, key, max, key === 'siteName' || key === 'loginTitle')
+    })
+  }
+  for (const key of ['logoUrl', 'faviconUrl', 'wordmarkLightUrl', 'wordmarkDarkUrl'] as const) {
+    const raw = merged[key]
+    if (raw !== null && typeof raw !== 'string') throw new HttpError(400, '图片地址格式无效')
+    normalized[key] = imageUrl(raw)
+  }
+  for (const key of [
+    'wordmarkImageEnabled',
+    'watermarkEnabled',
+    'captchaEnabled',
+    'registerEnabled',
+    'maintenanceEnabled',
+    'enabled'
+  ] as const) {
+    if (typeof merged[key] !== 'boolean') throw new HttpError(400, `${key}开关格式无效`)
+  }
+  if (
+    !['username', 'username_time', 'site_name', 'custom'].includes(merged.watermarkContentType) ||
+    !['zh', 'en'].includes(merged.defaultLanguage) ||
+    merged.captchaType !== 'turnstile' ||
+    !['normal', 'compact', 'flexible', 'hidden'].includes(merged.turnstileSize || '') ||
+    !['light', 'dark', 'auto'].includes(merged.turnstileTheme || '')
+  )
+    throw new HttpError(400, '请选择有效的网站语言、验证码或水印设置')
+  if (
+    !Number.isSafeInteger(merged.captchaMaxAttempts) ||
+    merged.captchaMaxAttempts < 0 ||
+    merged.captchaMaxAttempts > 20 ||
+    !Number.isSafeInteger(merged.captchaLockMinutes) ||
+    merged.captchaLockMinutes < 0 ||
+    merged.captchaLockMinutes > 1440
+  )
+    throw new HttpError(400, '验证码次数或锁定时间无效')
+  if (merged.wordmarkImageEnabled && (!normalized.wordmarkLightUrl || !normalized.wordmarkDarkUrl))
+    throw new HttpError(400, '启用品牌字图后，请同时配置亮色和暗色字图')
+  if (
+    merged.watermarkEnabled &&
+    merged.watermarkContentType === 'custom' &&
+    !normalized.watermarkCustomText
+  )
+    throw new HttpError(400, '请填写自定义水印内容')
+  if (merged.captchaEnabled && !normalized.turnstileSiteKey)
+    throw new HttpError(400, '启用登录验证后，请填写 Turnstile Site Key')
+  if (merged.maintenanceEnabled && !normalized.maintenanceMessage)
+    throw new HttpError(400, '开启维护模式后，请填写维护提示文案')
+  const channelError = getAuthChannelValidationMessage(merged.authChannels)
+  if (channelError) throw new HttpError(400, channelError)
+  if (!Array.isArray(merged.authChannels)) throw new HttpError(400, '认证渠道配置格式无效')
+  for (const channel of merged.authChannels) {
+    if (
+      !isObjectRecord(channel) ||
+      Object.keys(channel).some(
+        (key) =>
+          ![
+            'key',
+            'label',
+            'provider',
+            'icon',
+            'description',
+            'scopes',
+            'queryParamName',
+            'queryParamValue',
+            'enabled',
+            'allowLinking'
+          ].includes(key)
+      ) ||
+      typeof channel.enabled !== 'boolean' ||
+      typeof channel.allowLinking !== 'boolean' ||
+      typeof channel.icon !== 'string' ||
+      !/^[a-z0-9-]+:[a-z0-9-]+$/.test(channel.icon) ||
+      channel.icon.length > 80 ||
+      typeof channel.key !== 'string' ||
+      channel.key.length > 40 ||
+      typeof channel.label !== 'string' ||
+      channel.label.length > 40 ||
+      typeof channel.provider !== 'string' ||
+      channel.provider.length > 50 ||
+      (typeof channel.queryParamName === 'string' &&
+        /(^|[._-])(secret|password|token|api[_-]?key)([._-]|$)/i.test(channel.queryParamName)) ||
+      ['description', 'scopes', 'queryParamName', 'queryParamValue'].some(
+        (key) =>
+          channel[key] !== undefined && channel[key] !== null && typeof channel[key] !== 'string'
+      ) ||
+      (
+        [
+          ['description', 100],
+          ['scopes', 200],
+          ['queryParamName', 64],
+          ['queryParamValue', 160]
+        ] as const
+      ).some(([key, max]) => typeof channel[key] === 'string' && channel[key].length > max)
+    )
+      throw new HttpError(400, '认证渠道配置格式无效')
+  }
+  normalized.authChannels = normalizeAuthChannels(merged.authChannels)
+  if (normalized.authChannels.length !== merged.authChannels.length)
+    throw new HttpError(400, '认证渠道配置格式无效')
+  return normalized
 }
 
 export function brandingDto(value: unknown): BffBrandingRecord {
@@ -97,7 +208,7 @@ export async function writeBranding(
   session: Session
 ): Promise<BffBrandingRecord> {
   requireMutation(req, session)
-  const input = await body(req, 16384)
+  const input = await body(req, 32768)
   if (
     typeof input.version !== 'number' ||
     !Number.isSafeInteger(input.version) ||

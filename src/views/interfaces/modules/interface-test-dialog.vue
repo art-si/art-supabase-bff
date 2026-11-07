@@ -122,6 +122,12 @@
 </template>
 
 <script setup lang="ts">
+  import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
+  const booleanOptions = useDictionaryOptions(
+    BFF_DICTIONARIES.common.boolean,
+    (value) => value === 'true'
+  )
   import type { FormRules } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { useArtFeedback } from '@/hooks/core/useArtFeedback'
@@ -188,10 +194,7 @@
           ? {
               clearable: !field.required,
               placeholder: '选择是或否',
-              options: [
-                { label: '是', value: true },
-                { label: '否', value: false }
-              ]
+              options: booleanOptions
             }
           : field.type === 'number'
             ? { placeholder: '输入数字' }

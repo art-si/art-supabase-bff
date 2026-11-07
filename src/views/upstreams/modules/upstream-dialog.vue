@@ -45,21 +45,54 @@
         :closable="false"
         show-icon
       />
-      <ArtForm
-        ref="formRef"
-        v-model="form"
-        :items="formItems"
-        :rules="rules"
-        :span="12"
-        :gutter="18"
-        label-width="104px"
-      />
+      <ElTabs v-model="activeTab" class="min-w-0">
+        <ElTabPane label="服务身份" name="identity">
+          <ArtForm
+            ref="formRef"
+            v-model="form"
+            :items="identityItems"
+            :rules="rules"
+            :span="12"
+            :gutter="18"
+            label-position="top"
+            root-class="p-0!"
+          />
+        </ElTabPane>
+        <ElTabPane label="连接配置" name="connection">
+          <ArtForm
+            ref="connectionFormRef"
+            v-model="form"
+            :items="connectionItems"
+            :rules="rules"
+            :span="12"
+            :gutter="18"
+            label-position="top"
+            root-class="p-0!"
+          />
+        </ElTabPane>
+        <ElTabPane label="认证与凭据" name="auth">
+          <ArtForm
+            ref="authFormRef"
+            v-model="form"
+            :items="authItems"
+            :rules="rules"
+            :span="12"
+            :gutter="18"
+            label-position="top"
+            root-class="p-0!"
+          />
+        </ElTabPane>
+      </ElTabs>
       <ElAlert v-if="saveError" :title="saveError" type="error" :closable="false" show-icon />
     </div>
   </ArtDialog>
 </template>
 
 <script setup lang="ts">
+  import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
+  const environmentOptions = useDictionaryOptions(BFF_DICTIONARIES.common.environment)
+  const authTypeOptions = useDictionaryOptions(BFF_DICTIONARIES.upstreams.authType)
   import type { FormRules } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { validateArtFormForSubmit } from '@/utils/form/validate-art-form'
@@ -85,6 +118,9 @@
   const { hasAuth } = useAuth()
   const dialogRef = ref<ArtDialogExpose<UpstreamService | undefined>>()
   const formRef = ref<InstanceType<typeof ArtForm>>()
+  const connectionFormRef = ref<InstanceType<typeof ArtForm>>()
+  const authFormRef = ref<InstanceType<typeof ArtForm>>()
+  const activeTab = ref('identity')
   const upstream = shallowRef<UpstreamService>()
   const options = shallowRef<UpstreamOptions>()
   const saving = ref(false)
@@ -166,7 +202,6 @@
   }))
 
   const formItems = computed<FormItem[]>(() => [
-    { key: 'identity', label: '服务身份', type: 'divider', span: 24 },
     {
       key: 'applicationId',
       label: '所属应用',
@@ -191,7 +226,7 @@
       props: {
         disabled: Boolean(upstream.value),
         placeholder: '选择环境',
-        options: options.value?.environments ?? []
+        options: environmentOptions
       }
     },
     {
@@ -226,7 +261,6 @@
         placeholder: '说明上游服务用途、负责人和调用边界'
       }
     },
-    { key: 'connection', label: '连接配置', type: 'divider', span: 24 },
     {
       key: 'baseUrl',
       label: '基础地址',
@@ -259,11 +293,7 @@
           Boolean(upstream.value) &&
           (!canChangeCredentialPolicy.value || upstream.value?.status === 'active')
       },
-      options: [
-        { label: '无认证', value: 'none' },
-        { label: 'Bearer Token', value: 'bearer' },
-        { label: 'API Key 请求头', value: 'api_key_header' }
-      ],
+      options: authTypeOptions,
       description:
         upstream.value?.status === 'active'
           ? '切换认证方式前请先停用服务。'
@@ -302,6 +332,18 @@
     }
   ])
 
+  const identityItems = computed(() =>
+    formItems.value.filter((item) =>
+      ['applicationId', 'environment', 'code', 'name', 'description'].includes(item.key)
+    )
+  )
+  const connectionItems = computed(() =>
+    formItems.value.filter((item) => ['baseUrl', 'timeoutMs'].includes(item.key))
+  )
+  const authItems = computed(() =>
+    formItems.value.filter((item) => ['authType', 'headerName', 'credential'].includes(item.key))
+  )
+
   function clearCredential(): void {
     form.value.credential = ''
     upstream.value = undefined
@@ -332,7 +374,16 @@
     if (saving.value || !options.value || optionsPending.value || optionsLoadError.value)
       return false
     try {
-      if (!(await validateArtFormForSubmit(formRef.value))) return false
+      for (const [tab, currentForm] of [
+        ['identity', formRef.value],
+        ['connection', connectionFormRef.value],
+        ['auth', authFormRef.value]
+      ] as const) {
+        if (!(await validateArtFormForSubmit(currentForm))) {
+          activeTab.value = tab
+          return false
+        }
+      }
     } catch {
       saveError.value = '表单校验未完成，请检查填写内容后重试'
       return false
@@ -377,6 +428,7 @@
     optionsPending.value = pending
     optionsLoadError.value = ''
     upstream.value = row
+    activeTab.value = 'identity'
     saveError.value = ''
     form.value = {
       applicationId:
@@ -393,6 +445,8 @@
     }
     await nextTick()
     formRef.value?.clearValidate()
+    connectionFormRef.value?.clearValidate()
+    authFormRef.value?.clearValidate()
     await dialogRef.value?.handleOpen(row, {
       title: row ? '编辑上游服务' : '登记上游服务',
       size: 'lg',

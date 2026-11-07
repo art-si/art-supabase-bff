@@ -1,7 +1,23 @@
 import type { AppRouteRecord } from '@/types/router'
 import { toNextDayStartUTC, toStartOfDayUTC } from '@/utils/time/format'
-import { call } from '@bff/api/bff'
+import { bffSession, call } from '@bff/api/bff'
 export * from 'art-supabase-pro/src/api/system-manage'
+
+export async function fetchRoleOrganizationTree(params: { tenantId?: string | null } = {}) {
+  if (params.tenantId && params.tenantId !== bffSession.value?.user.tenantId)
+    return { data: [], error: null }
+  const data = await call<Api.SystemManage.OrganizationScopeFilterItem[]>(
+    '/api/control/organizations'
+  )
+  return { data, error: null }
+}
+
+export async function fetchEnabledOrganizationTree(params: { tenantId?: string | null } = {}) {
+  if (params.tenantId && params.tenantId !== bffSession.value?.user.tenantId)
+    return { data: [], error: null }
+  const data = await call<Api.SystemManage.OrganizationListItem[]>('/api/control/organizations')
+  return { data, error: null }
+}
 
 interface MenuSnapshot {
   revision: number

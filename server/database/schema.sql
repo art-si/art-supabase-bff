@@ -361,6 +361,10 @@ create table if not exists public.bff_interface_calls (
     references public.bff_interface_versions(id,tenant_id,application_id,environment,interface_id),
   foreign key (member_id,tenant_id) references public.bff_members(id,tenant_id)
 );
+alter table public.bff_interface_calls add column if not exists error_class text;
+alter table public.bff_interface_calls drop constraint if exists bff_interface_calls_error_class_check;
+alter table public.bff_interface_calls add constraint bff_interface_calls_error_class_check
+  check (error_class in ('timeout','upstream','unknown','authorization','validation','rate_limited'));
 create unique index if not exists bff_interface_calls_idempotency_uidx
   on public.bff_interface_calls(tenant_id,member_id,idempotency_hash) where idempotency_hash is not null;
 create index if not exists bff_interface_calls_scope_time_idx
@@ -371,36 +375,196 @@ create index if not exists bff_interface_calls_tenant_time_idx
   on public.bff_interface_calls(tenant_id,started_at desc);
 create index if not exists bff_interface_calls_running_idx
   on public.bff_interface_calls(tenant_id,expires_at) where status='running';
+create index if not exists bff_interface_calls_replay_expiry_idx
+  on public.bff_interface_calls(tenant_id,result_expires_at) where result_payload is not null;
+create index if not exists bff_interface_calls_monitor_idx
+  on public.bff_interface_calls(tenant_id,application_id,environment,started_at desc,request_id desc);
+create index if not exists bff_interface_calls_status_monitor_idx
+  on public.bff_interface_calls(tenant_id,application_id,environment,status,error_class,started_at desc);
+create table if not exists public.bff_alert_rules (
+  id uuid primary key default gen_random_uuid(),
+  tenant_id uuid not null,
+  application_id uuid not null,
+  environment text not null check (environment in ('development','staging','production')),
+  interface_id uuid,
+  name text not null check (length(trim(name)) between 1 and 100),
+  metric text not null check (metric in ('failure_count','failure_rate','timeout_count','unknown_count')),
+  window_minutes integer not null check (window_minutes in (5,15,60)),
+  threshold numeric(8,2) not null check (threshold>0),
+  min_calls integer not null default 1 check (min_calls between 1 and 1000000),
+  severity text not null check (severity in ('warning','critical')),
+  enabled boolean not null default false,
+  quiet_minutes integer not null default 0 check (quiet_minutes between 0 and 1440),
+  version integer not null default 1 check (version>0),
+  archived_at timestamptz,
+  last_evaluated_at timestamptz,
+  last_triggered_at timestamptz,
+  created_by uuid not null,
+  updated_by uuid not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check ((metric='failure_rate' and threshold between 0.1 and 100) or
+    (metric<>'failure_rate' and threshold>=1 and threshold=trunc(threshold))),
+  foreign key (application_id,tenant_id) references public.bff_applications(id,tenant_id),
+  foreign key (interface_id,tenant_id,application_id,environment)
+    references public.bff_interfaces(id,tenant_id,application_id,environment),
+  foreign key (created_by,tenant_id) references public.bff_members(id,tenant_id),
+  foreign key (updated_by,tenant_id) references public.bff_members(id,tenant_id)
+);
+create unique index if not exists bff_alert_rules_id_scope_uidx
+  on public.bff_alert_rules(id,tenant_id,application_id,environment);
+create index if not exists bff_alert_rules_eval_idx
+  on public.bff_alert_rules(last_evaluated_at nulls first,id) where enabled and archived_at is null;
+create index if not exists bff_alert_rules_scope_idx
+  on public.bff_alert_rules(tenant_id,application_id,environment,created_at desc,id);
+create table if not exists public.bff_alert_instances (
+  id uuid primary key default gen_random_uuid(),
+  rule_id uuid not null,
+  tenant_id uuid not null,
+  application_id uuid not null,
+  environment text not null,
+  interface_id uuid,
+  metric text not null check (metric in ('failure_count','failure_rate','timeout_count','unknown_count')),
+  severity text not null check (severity in ('warning','critical')),
+  state text not null check (state in ('open','acknowledged','recovered','closed')),
+  observed_value numeric(10,2) not null check (observed_value>=0),
+  known_calls integer not null check (known_calls>=0),
+  failed_calls integer not null check (failed_calls>=0),
+  unknown_calls integer not null check (unknown_calls>=0),
+  window_started_at timestamptz not null,
+  window_ended_at timestamptz not null,
+  opened_at timestamptz not null default now(),
+  acknowledged_at timestamptz,
+  acknowledged_by uuid,
+  recovered_at timestamptz,
+  closed_at timestamptz,
+  closed_reason text check (closed_reason in ('disabled','archived','reconfigured')),
+  last_observed_at timestamptz not null default now(),
+  version integer not null default 1 check (version>0),
+  check ((state='acknowledged')=(acknowledged_at is not null and recovered_at is null and closed_at is null) or
+    (state in ('recovered','closed') and (recovered_at is not null or closed_at is not null)) or
+    (state='open' and acknowledged_at is null and recovered_at is null and closed_at is null)),
+  check ((state='recovered' and recovered_at is not null and closed_at is null and closed_reason is null) or
+    (state='closed' and closed_at is not null and recovered_at is null and closed_reason is not null) or
+    (state in ('open','acknowledged') and recovered_at is null and closed_at is null and closed_reason is null)),
+  foreign key (rule_id,tenant_id,application_id,environment)
+    references public.bff_alert_rules(id,tenant_id,application_id,environment),
+  foreign key (acknowledged_by,tenant_id) references public.bff_members(id,tenant_id)
+);
+create unique index if not exists bff_alert_instance_unfinished_uidx
+  on public.bff_alert_instances(rule_id) where state in ('open','acknowledged');
+create index if not exists bff_alert_instances_scope_idx
+  on public.bff_alert_instances(tenant_id,application_id,environment,opened_at desc,id);
 create or replace function public.bff_valid_branding(p_config jsonb)
 returns boolean language plpgsql immutable security invoker set search_path='' as $$
-declare item text; address text;
+declare item text; address text; channel jsonb; channel_key text; provider text;
+  seen_keys text[]:=array[]::text[]; seen_providers text[]:=array[]::text[];
 begin
-  if jsonb_typeof(p_config) is distinct from 'object' or not (p_config ?& array[
-    'siteName','siteShortName','siteDescription','logoUrl','faviconUrl',
-    'watermarkEnabled','watermarkContentType','watermarkCustomText']) or
+  if jsonb_typeof(p_config) is distinct from 'object' then return false; end if;
+  if not (p_config ?& array[
+    'siteName','siteShortName','siteDescription','logoUrl','faviconUrl','wordmarkImageEnabled',
+    'wordmarkLightUrl','wordmarkDarkUrl','watermarkEnabled','watermarkContentType',
+    'watermarkCustomText','loginTitle','loginSubtitle','loginDescription','defaultLanguage',
+    'captchaEnabled','captchaType','turnstileSiteKey','turnstileSize','turnstileTheme',
+    'captchaMaxAttempts','captchaLockMinutes','registerEnabled','authChannels',
+    'maintenanceEnabled','maintenanceMessage','seoTitle','seoKeywords','seoDescription',
+    'contactEmail','contactPhone','contactAddress','copyrightText','icpRecord','policeRecord','enabled']) or
     exists(select 1 from jsonb_object_keys(p_config) as k(name) where k.name not in (
-      'siteName','siteShortName','siteDescription','logoUrl','faviconUrl',
-      'watermarkEnabled','watermarkContentType','watermarkCustomText'))
+      'siteName','siteShortName','siteDescription','logoUrl','faviconUrl','wordmarkImageEnabled',
+      'wordmarkLightUrl','wordmarkDarkUrl','watermarkEnabled','watermarkContentType',
+      'watermarkCustomText','loginTitle','loginSubtitle','loginDescription','defaultLanguage',
+      'captchaEnabled','captchaType','turnstileSiteKey','turnstileSize','turnstileTheme',
+      'captchaMaxAttempts','captchaLockMinutes','registerEnabled','authChannels',
+      'maintenanceEnabled','maintenanceMessage','seoTitle','seoKeywords','seoDescription',
+      'contactEmail','contactPhone','contactAddress','copyrightText','icpRecord','policeRecord','enabled'))
   then return false; end if;
   foreach item in array array['siteName','siteShortName','siteDescription','logoUrl','faviconUrl',
-    'watermarkContentType','watermarkCustomText'] loop
+    'wordmarkLightUrl','wordmarkDarkUrl','watermarkContentType','watermarkCustomText','loginTitle',
+    'loginSubtitle','loginDescription','defaultLanguage','captchaType','turnstileSiteKey',
+    'turnstileSize','turnstileTheme','maintenanceMessage','seoTitle','seoKeywords',
+    'seoDescription','contactEmail','contactPhone','contactAddress','copyrightText',
+    'icpRecord','policeRecord'] loop
     if jsonb_typeof(p_config->item) is distinct from 'string' then return false; end if;
+  end loop;
+  foreach item in array array['wordmarkImageEnabled','watermarkEnabled','captchaEnabled',
+    'registerEnabled','maintenanceEnabled','enabled'] loop
+    if jsonb_typeof(p_config->item) is distinct from 'boolean' then return false; end if;
+  end loop;
+  foreach item in array array['captchaMaxAttempts','captchaLockMinutes'] loop
+    if jsonb_typeof(p_config->item) is distinct from 'number' or (p_config->>item) !~ '^[0-9]+$'
+    then return false; end if;
   end loop;
   if length(trim(p_config->>'siteName')) not between 1 and 60 or
     length(p_config->>'siteShortName')>40 or length(p_config->>'siteDescription')>255 or
-    jsonb_typeof(p_config->'watermarkEnabled') is distinct from 'boolean' or
+    length(p_config->>'watermarkCustomText')>80 or length(trim(p_config->>'loginTitle')) not between 1 and 80 or
+    length(p_config->>'loginSubtitle')>255 or length(p_config->>'loginDescription')>255 or
+    length(p_config->>'turnstileSiteKey')>120 or length(p_config->>'maintenanceMessage')>160 or
+    length(p_config->>'seoTitle')>80 or length(p_config->>'seoKeywords')>160 or
+    length(p_config->>'seoDescription')>500 or length(p_config->>'contactEmail')>254 or
+    length(p_config->>'contactPhone')>64 or length(p_config->>'contactAddress')>500 or
+    length(p_config->>'copyrightText')>255 or length(p_config->>'icpRecord')>160 or
+    length(p_config->>'policeRecord')>160 or
     p_config->>'watermarkContentType' not in ('username','username_time','site_name','custom') or
-    length(p_config->>'watermarkCustomText')>80
+    p_config->>'defaultLanguage' not in ('zh','en') or p_config->>'captchaType'<>'turnstile' or
+    p_config->>'turnstileSize' not in ('normal','compact','flexible','hidden') or
+    p_config->>'turnstileTheme' not in ('light','dark','auto') or
+    (p_config->>'captchaMaxAttempts')::numeric not between 0 and 20 or
+    (p_config->>'captchaLockMinutes')::numeric not between 0 and 1440
   then return false; end if;
   if (p_config->>'watermarkEnabled')::boolean and p_config->>'watermarkContentType'='custom' and
     length(trim(p_config->>'watermarkCustomText'))=0 then return false; end if;
-  foreach item in array array['logoUrl','faviconUrl'] loop
+  if (p_config->>'captchaEnabled')::boolean and length(trim(p_config->>'turnstileSiteKey'))=0
+  then return false; end if;
+  if (p_config->>'maintenanceEnabled')::boolean and length(trim(p_config->>'maintenanceMessage'))=0
+  then return false; end if;
+  if (p_config->>'wordmarkImageEnabled')::boolean and
+    (length(trim(p_config->>'wordmarkLightUrl'))=0 or length(trim(p_config->>'wordmarkDarkUrl'))=0)
+  then return false; end if;
+  foreach item in array array['logoUrl','faviconUrl','wordmarkLightUrl','wordmarkDarkUrl'] loop
     address:=p_config->>item;
     if length(address)>2000 or address ~ '[[:space:]\\?#]' or left(address,2)='//' or
       (address<>'' and address !~ '^https://[^/@[:space:]?#]+(/[^[:space:]?#]*)?$' and
         address !~ '^/[^/[:space:]?#][^[:space:]?#]*$') or
       address ~ '(^|/)\.{1,2}(/|$)'
     then return false; end if;
+  end loop;
+  if jsonb_typeof(p_config->'authChannels') is distinct from 'array' then return false; end if;
+  if jsonb_array_length(p_config->'authChannels')>20 then return false; end if;
+  for channel in select value from jsonb_array_elements(p_config->'authChannels') loop
+    if jsonb_typeof(channel) is distinct from 'object' then return false; end if;
+    if not (channel ?& array[
+      'key','label','provider','icon','enabled','allowLinking']) or
+      exists(select 1 from jsonb_object_keys(channel) as k(name) where k.name not in (
+        'key','label','provider','icon','description','scopes','queryParamName','queryParamValue',
+        'enabled','allowLinking')) or
+      jsonb_typeof(channel->'key') is distinct from 'string' or
+      jsonb_typeof(channel->'label') is distinct from 'string' or
+      jsonb_typeof(channel->'provider') is distinct from 'string' or
+      jsonb_typeof(channel->'icon') is distinct from 'string' or
+      jsonb_typeof(channel->'enabled') is distinct from 'boolean' or
+      jsonb_typeof(channel->'allowLinking') is distinct from 'boolean'
+    then return false; end if;
+    foreach item in array array['description','scopes','queryParamName','queryParamValue'] loop
+      if channel ? item and jsonb_typeof(channel->item) not in ('string','null') then return false; end if;
+    end loop;
+    channel_key:=channel->>'key'; provider:=channel->>'provider';
+    if channel_key !~ '^[a-z][a-z0-9_-]{1,39}$' or channel_key=any(seen_keys) or
+      length(trim(channel->>'label')) not between 1 and 40 or
+      length(channel->>'icon')>80 or channel->>'icon' !~ '^[a-z0-9-]+:[a-z0-9-]+$' or
+      (provider not in ('apple','azure','bitbucket','discord','facebook','figma','github','gitlab',
+        'google','kakao','keycloak','linkedin','linkedin_oidc','notion','slack','slack_oidc',
+        'spotify','twitch','twitter','workos','x','zoom') and
+        provider !~ '^custom:[a-z0-9][a-z0-9:-]{0,42}[a-z0-9]$') or
+      provider=any(seen_providers) or length(coalesce(channel->>'description',''))>100 or
+      length(coalesce(channel->>'scopes',''))>200 or
+      length(coalesce(channel->>'queryParamName',''))>64 or
+      length(coalesce(channel->>'queryParamValue',''))>160 or
+      coalesce(channel->>'queryParamName','') ~* '(^|[._-])(secret|password|token|api[_-]?key)([._-]|$)' or
+      (coalesce(channel->>'queryParamName','')<>'' and
+        (channel->>'queryParamName' !~ '^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$' or
+          coalesce(channel->>'queryParamValue','')=''))
+    then return false; end if;
+    seen_keys:=array_append(seen_keys,channel_key); seen_providers:=array_append(seen_providers,provider);
   end loop;
   return true;
 end $$;
@@ -417,6 +581,85 @@ create table if not exists public.bff_platform_settings (
 );
 create index if not exists bff_platform_settings_creator_idx on public.bff_platform_settings(created_by);
 create index if not exists bff_platform_settings_updater_idx on public.bff_platform_settings(updated_by);
+insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types)
+  values('bff-assets','bff-assets',false,10485760,array[
+    'image/png','image/jpeg','image/webp','image/gif','image/x-icon','image/vnd.microsoft.icon',
+    'application/pdf','application/msword','application/vnd.ms-excel','application/vnd.ms-powerpoint',
+    'audio/mpeg','video/mp4','audio/ogg','audio/wav','video/webm','application/zip',
+    'text/plain','text/csv','application/json',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation'])
+  on conflict(id) do nothing;
+do $$ begin
+  if not exists(select 1 from storage.buckets where id='bff-assets' and name='bff-assets' and not public and
+    file_size_limit=10485760 and allowed_mime_types @> array[
+      'image/png','image/jpeg','image/webp','image/gif','image/x-icon','image/vnd.microsoft.icon',
+      'application/pdf','application/msword','application/vnd.ms-excel','application/vnd.ms-powerpoint',
+      'audio/mpeg','video/mp4','audio/ogg','audio/wav','video/webm','application/zip',
+      'text/plain','text/csv','application/json',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation'])
+  then raise exception 'BFF_RESOURCE_BUCKET_POLICY_MISMATCH'; end if;
+end $$;
+create table if not exists public.bff_resources (
+  id bigint generated always as identity primary key check (id between 1 and 9007199254740991),
+  tenant_id uuid not null,
+  storage_bucket text not null default 'bff-assets' check (storage_bucket='bff-assets'),
+  storage_path text not null,
+  object_name text not null,
+  origin_name text not null check (length(trim(origin_name)) between 1 and 255 and origin_name !~ '[[:cntrl:]/\\]'),
+  mime_type text not null check (length(mime_type) between 3 and 150 and
+    mime_type ~ '^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$'),
+  suffix text not null check (suffix ~ '^[a-z0-9]{1,10}$'),
+  size_byte bigint not null check (size_byte between 1 and 10485760),
+  hash text not null check (hash ~ '^[0-9a-f]{64}$'),
+  status text not null default 'pending' check (status in ('pending','ready','deleting','deleted')),
+  upload_token_hash text check (upload_token_hash ~ '^[0-9a-f]{64}$'),
+  cleanup_token_hash text check (cleanup_token_hash ~ '^[0-9a-f]{64}$'),
+  cleanup_lease_until timestamptz,
+  version integer not null default 1 check (version>0),
+  created_by uuid not null,
+  updated_by uuid not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz,
+  unique(storage_bucket,storage_path,object_name),
+  unique(id,tenant_id),
+  check (storage_path=tenant_id::text and object_name ~ '^[0-9a-f-]{36}[.][a-z0-9]{1,10}$'),
+  check ((status='pending' and upload_token_hash is not null and deleted_at is null) or
+    (status='ready' and upload_token_hash is null and deleted_at is null) or
+    (status='deleting' and upload_token_hash is null and deleted_at is null) or
+    (status='deleted' and upload_token_hash is null and deleted_at is not null)),
+  foreign key (created_by,tenant_id) references public.bff_members(id,tenant_id),
+  foreign key (updated_by,tenant_id) references public.bff_members(id,tenant_id)
+);
+create index if not exists bff_resources_tenant_ready_idx
+  on public.bff_resources(tenant_id,created_at desc,id desc) where status='ready';
+create index if not exists bff_resources_cleanup_idx
+  on public.bff_resources(status,created_at,id) where status in ('pending','deleting');
+revoke all on sequence public.bff_resources_id_seq from public,anon,authenticated,service_role;
+grant usage,select on sequence public.bff_resources_id_seq to service_role;
+create or replace function public.bff_guard_resource_identity()
+returns trigger language plpgsql security invoker set search_path='' as $$
+begin
+  if NEW.id is distinct from OLD.id or NEW.tenant_id is distinct from OLD.tenant_id or
+    NEW.storage_bucket is distinct from OLD.storage_bucket or NEW.storage_path is distinct from OLD.storage_path or
+    NEW.object_name is distinct from OLD.object_name or NEW.hash is distinct from OLD.hash or
+    NEW.mime_type is distinct from OLD.mime_type or NEW.suffix is distinct from OLD.suffix or
+    NEW.size_byte is distinct from OLD.size_byte or NEW.created_by is distinct from OLD.created_by or
+    NEW.created_at is distinct from OLD.created_at or NEW.version<OLD.version or
+    (OLD.status='pending' and NEW.status not in ('pending','ready','deleting')) or
+    (OLD.status='ready' and NEW.status not in ('ready','deleting')) or
+    (OLD.status='deleting' and NEW.status not in ('deleting','deleted')) or
+    (OLD.status='deleted' and NEW.status<>'deleted')
+  then raise exception 'BFF_RESOURCE_IDENTITY_IMMUTABLE'; end if;
+  return NEW;
+end $$;
+drop trigger if exists bff_resource_identity_guard on public.bff_resources;
+create trigger bff_resource_identity_guard before update on public.bff_resources
+  for each row execute function public.bff_guard_resource_identity();
 create or replace function public.bff_guard_branding_identity()
 returns trigger language plpgsql security invoker set search_path='' as $$
 begin
@@ -429,13 +672,13 @@ create trigger bff_platform_settings_scope_guard before update on public.bff_pla
   for each row execute function public.bff_guard_branding_identity();
 create table if not exists public.bff_resource_revisions (
   tenant_id uuid not null,
-  resource text not null check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces','releases','branding')),
+  resource text not null check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces','releases','branding','alerts','resources')),
   version bigint not null default 1 check (version > 0),
   primary key (tenant_id,resource)
 );
 alter table public.bff_resource_revisions drop constraint if exists bff_resource_revisions_resource_check;
 alter table public.bff_resource_revisions add constraint bff_resource_revisions_resource_check
-  check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces','releases','branding'));
+  check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces','releases','branding','alerts','resources'));
 create table if not exists public.bff_menus (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null,
@@ -828,7 +1071,7 @@ begin
     (OLD.status<>'running' and
       (NEW.status is distinct from OLD.status or NEW.finished_at is distinct from OLD.finished_at or
        NEW.duration_ms is distinct from OLD.duration_ms or NEW.http_status is distinct from OLD.http_status or
-       NEW.error_code is distinct from OLD.error_code or NEW.steps is distinct from OLD.steps or
+       NEW.error_code is distinct from OLD.error_code or NEW.error_class is distinct from OLD.error_class or NEW.steps is distinct from OLD.steps or
        NEW.result_payload is not null or NEW.result_expires_at is not null))
   then raise exception using errcode='23514',message='BFF_CALL_IDENTITY_IMMUTABLE'; end if;
   return NEW;
@@ -1239,6 +1482,30 @@ begin
       from public.bff_members m where m.tenant_id=tenant),'[]'::jsonb));
 end $$;
 
+create or replace function public.bff_provision_member(p_actor uuid,p_identity jsonb,p_revision bigint)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; revision bigint; member_id uuid;
+begin
+  revision:=public.bff_control_lock(p_actor,'System:Member:Add','members');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or actor.role<>'admin' then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_revision is distinct from revision then raise exception 'BFF_CONFLICT'; end if;
+  if (p_identity->>'tenantId')::uuid is distinct from actor.tenant_id or
+    p_identity->>'issuer' is distinct from actor.issuer or
+    nullif(trim(p_identity->>'subject'),'') is null or
+    nullif(trim(p_identity->>'email'),'') is null then raise exception 'BFF_INVALID_IDENTITY'; end if;
+  if exists(select 1 from public.bff_members where issuer=p_identity->>'issuer' and subject=p_identity->>'subject')
+    then raise exception 'BFF_MEMBER_EXISTS'; end if;
+  insert into public.bff_members(issuer,subject,tenant_id,display_name,email,role,updated_by)
+    values(p_identity->>'issuer',p_identity->>'subject',actor.tenant_id,coalesce(p_identity->>'displayName',''),p_identity->>'email','viewer',p_actor)
+    returning id into member_id;
+  revision:=public.bff_control_advance(p_actor,'members','member.provision',member_id,jsonb_build_object('role','viewer','identityTenantId',p_identity->>'identityTenantId'));
+  return public.bff_read_members(p_actor);
+end $$;
+revoke all on function public.bff_provision_member(uuid,jsonb,bigint) from public,anon,authenticated;
+grant execute on function public.bff_provision_member(uuid,jsonb,bigint) to service_role;
+
+
 create or replace function public.bff_write_member(p_actor uuid,p_definition jsonb,p_revision bigint)
 returns jsonb language plpgsql security invoker set search_path='' as $$
 declare tenant uuid; actor_admin boolean; revision bigint; target public.bff_members; target_role text:=p_definition->>'role'; target_enabled boolean:=(p_definition->>'enabled')::boolean;
@@ -1287,7 +1554,8 @@ with recursive actor as (
     where n.type<>'button' and coalesce(n.meta->'isEnable','true'::jsonb)='true'::jsonb and not(n.id=any(p.visited)) and cardinality(p.visited)<128
 ), accessible as (
   select n.id,n.parent_id from active_tree n cross join actor a where n.type='menu' and
-    (a.role='admin' or (n.name='BffApplications' and public.bff_actor_can(p_actor,'BffApplication:View')) or exists(
+    (a.role='admin' or (n.name='BffApplications' and public.bff_actor_can(p_actor,'BffApplication:View')) or
+      (n.name='BffAlertInstances' and public.bff_actor_can(p_actor,'BffAlert:View')) or exists(
       select 1 from public.bff_menus b where b.parent_id=n.id and b.type='button' and b.name like '%:View' and public.bff_actor_can(p_actor,b.name)))
 ), visible as (
   select * from accessible union select p.id,p.parent_id from active_tree p join visible c on c.parent_id=p.id
@@ -1354,6 +1622,39 @@ end $$;
 revoke all on function public.bff_control_references(uuid,text,uuid[]) from public,anon,authenticated;
 grant execute on function public.bff_control_references(uuid,text,uuid[]) to service_role;
 
+create or replace function public.bff_migrate_branding_permissions(p_actor uuid)
+returns void language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; action text; old_button uuid; new_button uuid;
+  old_name text; new_name text;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled and role='admin';
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||actor.tenant_id::text,0));
+  foreach action in array array['View','Edit'] loop
+    old_name:='BffBrand:'||action;
+    new_name:='System:WebsiteConfig:'||case when action='Edit' then 'Publish' else 'View' end;
+    select id into old_button from public.bff_menus where tenant_id=actor.tenant_id and name=old_name;
+    select id into new_button from public.bff_menus where tenant_id=actor.tenant_id and name=new_name;
+    if old_button is not null and new_button is null then
+      update public.bff_menus set name=new_name,version=version+1,update_by=actor.id,update_time=now()
+        where id=old_button and tenant_id=actor.tenant_id;
+    elsif old_button is not null and new_button is not null then
+      insert into public.bff_role_menus(tenant_id,role_id,menu_id,create_by)
+        select actor.tenant_id,rm.role_id,new_button,rm.create_by from public.bff_role_menus rm
+        where rm.tenant_id=actor.tenant_id and rm.menu_id=old_button on conflict do nothing;
+      update public.bff_menus current_button set
+        meta=pg_catalog.jsonb_set(current_button.meta,'{isEnable}',
+          pg_catalog.to_jsonb(coalesce(current_button.meta->'isEnable','true'::jsonb)='true'::jsonb or
+            coalesce(legacy.meta->'isEnable','true'::jsonb)='true'::jsonb)),
+        version=current_button.version+1,update_by=actor.id,update_time=now()
+        from public.bff_menus legacy where current_button.id=new_button and legacy.id=old_button;
+      delete from public.bff_role_menus where tenant_id=actor.tenant_id and menu_id=old_button;
+      delete from public.bff_menus where tenant_id=actor.tenant_id and id=old_button;
+    end if;
+  end loop;
+end $$;
+revoke all on function public.bff_migrate_branding_permissions(uuid) from public,anon,authenticated;
+grant execute on function public.bff_migrate_branding_permissions(uuid) to service_role;
 -- Seed installed shared capabilities only, without changing existing records.
 -- An active, explicitly provisioned BFF administrator is required in each tenant.
 do $$
@@ -1372,6 +1673,7 @@ begin
       insert into public.bff_resource_revisions(tenant_id,resource) values(actor.tenant_id,'menus') on conflict do nothing;
       perform public.bff_control_advance(actor.id,'menus','menu.bootstrap',null,jsonb_build_object('normalized',normalized));
     end if;
+    perform public.bff_migrate_branding_permissions(actor.id);
     for entry in select * from (values
       ('BffApplications',null::text,'/applications','/bff/applications/index','应用管理','ri:apps-2-line','menu',1),
       ('BffSystem',null,'/system','/index/index','系统管理','ri:settings-3-line','folder',90),
@@ -1383,30 +1685,41 @@ begin
       ('BffUpstreams','BffServiceManagement','/upstreams','/bff/upstreams/index','上游服务','ri:links-line','menu',1),
       ('BffInterfaces','BffServiceManagement','/interfaces','/bff/interfaces/index','接口编排','ri:flow-chart','menu',2),
       ('BffReleases','BffServiceManagement','/releases','/bff/releases/index','版本发布','ri:git-branch-line','menu',3),
+      ('BffObservability',null,'/observability','/index/index','运行观测','ri:line-chart-line','folder',70),
+      ('BffCalls','BffObservability','/calls','/bff/calls/index','调用日志','ri:file-search-line','menu',1),
+      ('BffAlerts','BffObservability','/alerts','/index/index','告警中心','ri:alarm-warning-line','folder',2),
+      ('BffAlertRules','BffAlerts','/alerts/rules','/bff/alerts/rules/index','告警规则','ri:settings-4-line','menu',1),
+      ('BffAlertInstances','BffAlerts','/alerts/instances','/bff/alerts/index','告警事件','ri:notification-3-line','menu',2),
       ('BffDataCenter',null,'/data-center','/index/index','数据中心','ri:database-2-line','folder',91),
-      ('Dict','BffDataCenter','/data-center/dict','/shared/data-center/dict','字典管理','ri:book-2-line','menu',1)
+      ('Dict','BffDataCenter','/data-center/dict','/shared/data-center/dict','字典管理','ri:book-2-line','menu',1),
+      ('BffResources','BffDataCenter','/data-center/attachment','/shared/data-center/attachment','资源管理','ri:attachment-2','menu',2)
     ) as installed(name,parent_name,path,component,title,icon,type,sort) loop
       parent:=null;
       if entry.parent_name is not null then select id into parent from public.bff_menus where tenant_id=actor.tenant_id and name=entry.parent_name; end if;
       insert into public.bff_menus(tenant_id,parent_id,name,path,component,type,sort,meta,builtin,create_by,update_by)
         values(actor.tenant_id,parent,entry.name,entry.path,entry.component,entry.type,entry.sort,jsonb_build_object('title',entry.title,'icon',entry.icon,
-          'isEnable',entry.name not in ('BffInterfaces','BffReleases','BffBranding'),'keepAlive',true),true,actor.id,actor.id)
+          'isEnable',entry.name not in ('BffInterfaces','BffReleases','BffBranding','BffResources','BffObservability','BffCalls','BffAlerts','BffAlertRules','BffAlertInstances'),'keepAlive',true),true,actor.id,actor.id)
         on conflict (tenant_id,name) do nothing;
     end loop;
     for entry in select * from (values('BffApplications','BffApplication'),('Menu','System:Menu'),('Role','System:Role'),('User','System:Member'),
       ('BffUpstreams','BffUpstream'),('BffInterfaces','BffInterface'),
-      ('BffReleases','BffRelease'),('BffBranding','BffBrand'),('Dict','DataCenter:Dict')) as pages(name,mark) loop
+      ('BffReleases','BffRelease'),('BffBranding','System:WebsiteConfig'),('BffResources','BffResource'),('BffCalls','BffCall'),
+      ('BffAlertRules','BffAlert'),('BffAlertInstances','BffAlert'),('Dict','DataCenter:Dict')) as pages(name,mark) loop
       select id into page from public.bff_menus where tenant_id=actor.tenant_id and name=entry.name;
       foreach action in array case when entry.mark='BffApplication' then array['View','Add','Edit','Grant']
         when entry.mark='BffUpstream' then array['View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete']
         when entry.mark='BffInterface' then array['View','Add','Edit','Validate','Test','TestWrite','Delete']
         when entry.mark='BffRelease' then array['View','Publish','Rollback','ChangeStatus']
-        when entry.mark='BffBrand' then array['View','Edit']
+        when entry.mark='System:WebsiteConfig' then array['View','Publish']
+        when entry.mark='BffResource' then array['View','Add','Edit','Delete']
+        when entry.name='BffCalls' then array['View']
+        when entry.name='BffAlertRules' then array['View','Add','Edit','ChangeStatus','Archive','Evaluate']
+        when entry.name='BffAlertInstances' then array['View','Acknowledge']
         when entry.mark='System:Role' then array['View','Add','Edit','Delete','AssignPermission','AssignUser']
-        when entry.mark='System:Member' then array['View','Edit'] else array['View','Add','Edit','Delete'] end loop
+        when entry.mark='System:Member' then array['View','Add','Edit'] else array['View','Add','Edit','Delete'] end loop
         insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
-          values(actor.tenant_id,page,entry.mark||':'||action,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then '新增' when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Publish' then '发布版本' when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
-            'isEnable',entry.mark not in ('BffInterface','BffRelease','BffBrand')),true,actor.id,actor.id)
+          values(actor.tenant_id,page,case when entry.name='BffAlertRules' and action='View' then 'BffAlertRule:View' else entry.mark||':'||action end,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then case when entry.mark='System:Member' then '开通成员' else '新增' end when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Archive' then '归档' when 'Acknowledge' then '确认告警' when 'Evaluate' then '立即评估' when 'Publish' then case when entry.mark='System:WebsiteConfig' then '发布配置' else '发布版本' end when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
+            'isEnable',entry.mark not in ('BffInterface','BffRelease','System:WebsiteConfig','BffCall','BffAlert','BffResource')),true,actor.id,actor.id)
           on conflict (tenant_id,name) do nothing;
       end loop;
       if entry.mark='BffInterface' then
@@ -1476,13 +1789,26 @@ end $$;
 create or replace function public.bff_write_branding(p_actor uuid,p_version integer,p_config jsonb)
 returns jsonb language plpgsql security invoker set search_path='' as $$
 declare actor public.bff_members; current_record public.bff_platform_settings; revision bigint; changed jsonb;
+  branding_url text; resource_id bigint;
 begin
   if p_version is null or p_version<0 or not public.bff_valid_branding(p_config)
   then raise exception 'BFF_INVALID_BRANDING'; end if;
-  revision:=public.bff_control_lock(p_actor,'BffBrand:Edit','branding');
+  revision:=public.bff_control_lock(p_actor,'System:WebsiteConfig:Publish','branding');
   select * into actor from public.bff_members where id=p_actor and enabled;
   select * into current_record from public.bff_platform_settings where tenant_id=actor.tenant_id for update;
   if coalesce(current_record.version,0)<>p_version then raise exception 'BFF_CONFLICT'; end if;
+  foreach branding_url in array array[p_config->>'logoUrl',p_config->>'faviconUrl',
+    p_config->>'wordmarkLightUrl',p_config->>'wordmarkDarkUrl'] loop
+    if left(branding_url,15)='/api/resources/' then
+      if branding_url !~ '^/api/resources/[1-9][0-9]*/content$' then raise exception 'BFF_INVALID_BRANDING_RESOURCE'; end if;
+      begin resource_id:=pg_catalog.split_part(branding_url,'/',4)::bigint;
+      exception when others then raise exception 'BFF_INVALID_BRANDING_RESOURCE'; end;
+      if not exists(select 1 from public.bff_resources r where r.id=resource_id and r.tenant_id=actor.tenant_id and
+        r.status='ready' and r.mime_type in ('image/png','image/jpeg','image/webp','image/gif',
+          'image/x-icon','image/vnd.microsoft.icon'))
+      then raise exception 'BFF_INVALID_BRANDING_RESOURCE'; end if;
+    end if;
+  end loop;
   select coalesce(jsonb_agg(entry.field order by entry.field),'[]'::jsonb) into changed
     from jsonb_object_keys(p_config) as entry(field)
     where p_config->entry.field is distinct from current_record.config->entry.field;
@@ -1506,6 +1832,249 @@ revoke all on function public.bff_valid_branding(jsonb),public.bff_guard_brandin
   public.bff_write_branding(uuid,integer,jsonb),public.bff_session_context(uuid) from public,anon,authenticated;
 grant execute on function public.bff_valid_branding(jsonb),public.bff_guard_branding_identity(),public.bff_read_branding(uuid),
   public.bff_write_branding(uuid,integer,jsonb),public.bff_session_context(uuid) to service_role;
+create or replace function public.bff_resource_public(p_id bigint)
+returns jsonb language sql stable security invoker set search_path='' as $$
+select jsonb_build_object('id',r.id,'tenantId',r.tenant_id,'originName',r.origin_name,
+  'mimeType',r.mime_type,'suffix',r.suffix,'sizeByte',r.size_byte,
+  'sizeInfo',pg_catalog.pg_size_pretty(r.size_byte),'url','/api/resources/'||r.id::text||'/content',
+  'version',r.version,'createdAt',r.created_at,'updatedAt',r.updated_at)
+from public.bff_resources r where r.id=p_id and r.status='ready'
+$$;
+create or replace function public.bff_resource_reserve(
+  p_actor uuid,p_name text,p_mime text,p_suffix text,p_size bigint,p_hash text)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources; token text; object_name text;
+begin
+  if p_name is null or length(pg_catalog.btrim(p_name)) not between 1 and 255 or
+    p_name ~ '[[:cntrl:]/\\]' or p_size not between 1 and 10485760 or
+    p_hash is null or p_hash !~ '^[0-9a-f]{64}$' or
+    p_suffix is null or p_suffix !~ '^[a-z0-9]{1,10}$' or
+    lower(pg_catalog.btrim(p_name)) not like '%.'||p_suffix or
+    length(pg_catalog.btrim(p_name))<=length(p_suffix)+1 or
+    p_mime is null or not exists(select 1 from storage.buckets b where b.id='bff-assets' and
+      p_mime=any(b.allowed_mime_types))
+  then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  perform public.bff_control_lock(p_actor,'BffResource:Add','resources');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  token:=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(gen_random_uuid()::text||gen_random_uuid()::text,'UTF8'),'sha256'),'hex');
+  object_name:=gen_random_uuid()::text||'.'||p_suffix;
+  insert into public.bff_resources(tenant_id,storage_path,object_name,origin_name,mime_type,suffix,
+    size_byte,hash,upload_token_hash,created_by,updated_by)
+    values(actor.tenant_id,actor.tenant_id::text,object_name,pg_catalog.btrim(p_name),p_mime,p_suffix,
+      p_size,p_hash,pg_catalog.encode(extensions.digest(pg_catalog.convert_to(token,'UTF8'),'sha256'),'hex'),
+      p_actor,p_actor) returning * into saved;
+  perform public.bff_control_advance(p_actor,'resources','resource.reserve',null,
+    jsonb_build_object('resourceId',saved.id,'sizeByte',saved.size_byte));
+  return jsonb_build_object('id',saved.id,'storageBucket',saved.storage_bucket,
+    'objectKey',saved.storage_path||'/'||saved.object_name,'uploadToken',token);
+end $$;
+create or replace function public.bff_resource_complete(p_actor uuid,p_id bigint,p_token text)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources;
+begin
+  if p_id is null or p_token is null or p_token !~ '^[0-9a-f]{64}$' then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  perform public.bff_control_lock(p_actor,'BffResource:Add','resources');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  select * into saved from public.bff_resources where id=p_id and tenant_id=actor.tenant_id for update;
+  if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if saved.status<>'pending' or saved.created_by<>p_actor or saved.created_at<=now()-interval '1 hour' or
+    saved.upload_token_hash is distinct from
+      pg_catalog.encode(extensions.digest(pg_catalog.convert_to(p_token,'UTF8'),'sha256'),'hex')
+  then raise exception 'BFF_RESOURCE_RESERVATION_EXPIRED'; end if;
+  update public.bff_resources set status='ready',upload_token_hash=null,version=version+1,
+    updated_by=p_actor,updated_at=now() where id=p_id;
+  perform public.bff_control_advance(p_actor,'resources','resource.complete',null,
+    jsonb_build_object('resourceId',p_id));
+  return public.bff_resource_public(p_id);
+end $$;
+create or replace function public.bff_read_resources(
+  p_actor uuid,p_from integer default 0,p_to integer default 29,p_name text default '',p_suffixes text[] default array[]::text[])
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; total integer; records jsonb;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffResource:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_from is null or p_to is null or p_from<0 or p_to<p_from or p_to-p_from>99 or p_to>1000000 or
+    p_name is null or length(p_name)>100 or p_suffixes is null or cardinality(p_suffixes)>50 or
+    exists(select 1 from unnest(p_suffixes) as suffix(value) where suffix.value is null or
+      suffix.value !~ '^[a-z0-9]{1,10}$')
+  then raise exception 'BFF_INVALID_FILTER'; end if;
+  select count(*) into total from public.bff_resources r where r.tenant_id=actor.tenant_id and r.status='ready' and
+    (p_name='' or r.origin_name ilike '%'||p_name||'%') and
+    (cardinality(p_suffixes)=0 or r.suffix=any(p_suffixes));
+  select coalesce(jsonb_agg(public.bff_resource_public(q.id) order by q.created_at desc,q.id desc),'[]'::jsonb)
+    into records from (select r.id,r.created_at from public.bff_resources r
+      where r.tenant_id=actor.tenant_id and r.status='ready' and
+        (p_name='' or r.origin_name ilike '%'||p_name||'%') and
+        (cardinality(p_suffixes)=0 or r.suffix=any(p_suffixes))
+      order by r.created_at desc,r.id desc limit p_to-p_from+1 offset p_from) q;
+  return jsonb_build_object('data',records,'total',total);
+end $$;
+create or replace function public.bff_rename_resource(p_actor uuid,p_id bigint,p_version integer,p_name text)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources;
+begin
+  if p_id is null or p_version is null or p_version<1 or p_name is null or
+    length(pg_catalog.btrim(p_name)) not between 1 and 255 or p_name ~ '[[:cntrl:]/\\]'
+  then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  perform public.bff_control_lock(p_actor,'BffResource:Edit','resources');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  select * into saved from public.bff_resources where id=p_id and tenant_id=actor.tenant_id for update;
+  if saved.id is null or saved.status<>'ready' then raise exception 'BFF_NOT_FOUND'; end if;
+  if saved.version<>p_version then raise exception 'BFF_CONFLICT'; end if;
+  if lower(pg_catalog.btrim(p_name)) not like '%.'||saved.suffix or
+    length(pg_catalog.btrim(p_name))<=length(saved.suffix)+1
+  then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  update public.bff_resources set origin_name=pg_catalog.btrim(p_name),version=version+1,
+    updated_by=p_actor,updated_at=now() where id=p_id;
+  perform public.bff_control_advance(p_actor,'resources','resource.rename',null,
+    jsonb_build_object('resourceId',p_id));
+  return public.bff_resource_public(p_id);
+end $$;
+create or replace function public.bff_resource_references(p_actor uuid,p_ids bigint[])
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; result jsonb;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffResource:Delete') then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_ids is null or cardinality(p_ids) not between 1 and 100 or
+    exists(select 1 from unnest(p_ids) as requested(id) where requested.id is null or
+      not exists(select 1 from public.bff_resources r where r.id=requested.id and
+        r.tenant_id=actor.tenant_id and r.status='ready'))
+  then raise exception 'BFF_NOT_FOUND'; end if;
+  select coalesce(jsonb_agg(jsonb_build_object('resourceId',r.id,
+    'sourceTable','bff_platform_settings','dependencyCode',field.name,
+    'recordId',s.tenant_id,'targetId',r.id,'recordNo',s.config->>'siteName',
+    'recordSummary',case field.name when 'logoUrl' then '系统 Logo 正在使用'
+      when 'faviconUrl' then '浏览器图标正在使用'
+      else '品牌字图正在使用' end,
+    'createdAt',s.updated_at,'cleanupAllowed',false) order by r.id,field.name),'[]'::jsonb)
+    into result from public.bff_resources r
+    join public.bff_platform_settings s on s.tenant_id=r.tenant_id
+    cross join lateral (values('logoUrl'::text),('faviconUrl'::text),
+      ('wordmarkLightUrl'::text),('wordmarkDarkUrl'::text)) as field(name)
+    where r.tenant_id=actor.tenant_id and r.id=any(p_ids) and
+      s.config->>field.name='/api/resources/'||r.id::text||'/content';
+  return result;
+end $$;
+create or replace function public.bff_resource_delete_begin(p_actor uuid,p_id bigint,p_version integer)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources; token text;
+begin
+  if p_id is null or p_version is null or p_version<1 then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  perform public.bff_control_lock(p_actor,'BffResource:Delete','resources');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  -- Brand writers take the same tenant control lock, then brand row, then resource row.
+  perform 1 from public.bff_platform_settings where tenant_id=actor.tenant_id for update;
+  select * into saved from public.bff_resources where id=p_id and tenant_id=actor.tenant_id for update;
+  if saved.id is null or saved.status<>'ready' then raise exception 'BFF_NOT_FOUND'; end if;
+  if saved.version<>p_version then raise exception 'BFF_CONFLICT'; end if;
+  if public.bff_resource_references(p_actor,array[p_id])<>'[]'::jsonb then raise exception 'BFF_REFERENCED'; end if;
+  token:=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(gen_random_uuid()::text||gen_random_uuid()::text,'UTF8'),'sha256'),'hex');
+  update public.bff_resources set status='deleting',version=version+1,
+    cleanup_token_hash=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(token,'UTF8'),'sha256'),'hex'),
+    cleanup_lease_until=now()+interval '2 minutes',updated_by=p_actor,updated_at=now()
+    where id=p_id;
+  perform public.bff_control_advance(p_actor,'resources','resource.delete_begin',null,
+    jsonb_build_object('resourceId',p_id));
+  return jsonb_build_object('id',p_id,'storageBucket',saved.storage_bucket,
+    'objectKey',saved.storage_path||'/'||saved.object_name,'cleanupToken',token);
+end $$;
+create or replace function public.bff_resource_content(p_actor uuid,p_id bigint)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources; is_brand boolean;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  select * into saved from public.bff_resources where id=p_id and tenant_id=actor.tenant_id and status='ready';
+  if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  select exists(select 1 from public.bff_platform_settings s where s.tenant_id=actor.tenant_id and
+    (s.config->>'logoUrl'='/api/resources/'||p_id::text||'/content' or
+      s.config->>'faviconUrl'='/api/resources/'||p_id::text||'/content' or
+      s.config->>'wordmarkLightUrl'='/api/resources/'||p_id::text||'/content' or
+      s.config->>'wordmarkDarkUrl'='/api/resources/'||p_id::text||'/content')) into is_brand;
+  if not public.bff_actor_can(p_actor,'BffResource:View') and not
+    (is_brand and saved.mime_type in ('image/png','image/jpeg','image/webp','image/gif',
+      'image/x-icon','image/vnd.microsoft.icon'))
+  then raise exception 'BFF_FORBIDDEN'; end if;
+  return jsonb_build_object('id',saved.id,'storageBucket',saved.storage_bucket,
+    'objectKey',saved.storage_path||'/'||saved.object_name,'mimeType',saved.mime_type,
+    'sizeByte',saved.size_byte,'originName',saved.origin_name);
+end $$;
+create or replace function public.bff_resource_names(p_actor uuid,p_ids bigint[])
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; result jsonb; can_view boolean;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_ids is null or cardinality(p_ids)>50 or exists(select 1 from unnest(p_ids) as requested(id)
+    where requested.id is null or requested.id<1 or requested.id>9007199254740991)
+  then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  can_view:=public.bff_actor_can(p_actor,'BffResource:View');
+  select coalesce(jsonb_agg(jsonb_build_object('id',r.id,'originName',r.origin_name)
+    order by requested.ordinality),'[]'::jsonb) into result
+    from unnest(p_ids) with ordinality as requested(id,ordinality)
+    join public.bff_resources r on r.id=requested.id and r.tenant_id=actor.tenant_id and r.status='ready'
+    where can_view or (r.mime_type in ('image/png','image/jpeg','image/webp','image/gif',
+      'image/x-icon','image/vnd.microsoft.icon') and exists(select 1 from public.bff_platform_settings s
+        where s.tenant_id=actor.tenant_id and
+          (s.config->>'logoUrl'='/api/resources/'||r.id::text||'/content' or
+           s.config->>'faviconUrl'='/api/resources/'||r.id::text||'/content' or
+           s.config->>'wordmarkLightUrl'='/api/resources/'||r.id::text||'/content' or
+           s.config->>'wordmarkDarkUrl'='/api/resources/'||r.id::text||'/content')));
+  return result;
+end $$;
+create or replace function public.bff_resource_cleanup_claim(p_limit integer default 20)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare candidate public.bff_resources; token text; results jsonb:='[]'::jsonb;
+begin
+  if p_limit is null or p_limit not between 1 and 100 then raise exception 'BFF_INVALID_LIMIT'; end if;
+  for candidate in select * from public.bff_resources where
+    ((status='pending' and created_at<=now()-interval '1 hour') or status='deleting') and
+    (cleanup_lease_until is null or cleanup_lease_until<=now())
+    order by created_at,id limit p_limit for update skip locked
+  loop
+    token:=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(gen_random_uuid()::text||gen_random_uuid()::text,'UTF8'),'sha256'),'hex');
+    update public.bff_resources set status='deleting',upload_token_hash=null,
+      cleanup_token_hash=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(token,'UTF8'),'sha256'),'hex'),
+      cleanup_lease_until=now()+interval '2 minutes',
+      version=case when status='pending' then version+1 else version end,updated_at=now()
+      where id=candidate.id;
+    results:=results||jsonb_build_array(jsonb_build_object('id',candidate.id,
+      'storageBucket',candidate.storage_bucket,
+      'objectKey',candidate.storage_path||'/'||candidate.object_name,'cleanupToken',token));
+  end loop;
+  return results;
+end $$;
+create or replace function public.bff_resource_cleanup_finish(p_id bigint,p_token text)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare saved public.bff_resources;
+begin
+  if p_id is null or p_token is null or p_token !~ '^[0-9a-f]{64}$' then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  select * into saved from public.bff_resources where id=p_id for update;
+  if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if saved.status='deleted' then return jsonb_build_object('deleted',true); end if;
+  if saved.status<>'deleting' or saved.cleanup_token_hash is distinct from
+    pg_catalog.encode(extensions.digest(pg_catalog.convert_to(p_token,'UTF8'),'sha256'),'hex')
+  then raise exception 'BFF_RESOURCE_CLEANUP_LEASE'; end if;
+  update public.bff_resources set status='deleted',deleted_at=now(),cleanup_token_hash=null,
+    cleanup_lease_until=null,version=version+1,updated_at=now() where id=p_id;
+  return jsonb_build_object('deleted',true);
+end $$;
+revoke all on function public.bff_guard_resource_identity(),public.bff_resource_public(bigint),
+  public.bff_resource_reserve(uuid,text,text,text,bigint,text),public.bff_resource_complete(uuid,bigint,text),
+  public.bff_read_resources(uuid,integer,integer,text,text[]),public.bff_rename_resource(uuid,bigint,integer,text),
+  public.bff_resource_references(uuid,bigint[]),public.bff_resource_delete_begin(uuid,bigint,integer),
+  public.bff_resource_content(uuid,bigint),public.bff_resource_names(uuid,bigint[]),
+  public.bff_resource_cleanup_claim(integer),public.bff_resource_cleanup_finish(bigint,text)
+  from public,anon,authenticated;
+grant execute on function public.bff_guard_resource_identity(),public.bff_resource_public(bigint),
+  public.bff_resource_reserve(uuid,text,text,text,bigint,text),public.bff_resource_complete(uuid,bigint,text),
+  public.bff_read_resources(uuid,integer,integer,text,text[]),public.bff_rename_resource(uuid,bigint,integer,text),
+  public.bff_resource_references(uuid,bigint[]),public.bff_resource_delete_begin(uuid,bigint,integer),
+  public.bff_resource_content(uuid,bigint),public.bff_resource_names(uuid,bigint[]),
+  public.bff_resource_cleanup_claim(integer),public.bff_resource_cleanup_finish(bigint,text)
+  to service_role;
 -- Application reads re-evaluate the current member and role grants in the same
 -- database statement that selects data. A cached HTTP session is not authority.
 create or replace function public.bff_read_applications(p_actor uuid,p_page integer,p_size integer,p_keyword text)
@@ -2393,6 +2962,78 @@ begin
       'headerName',b.header_name) order by b.step_key)
       from public.bff_interface_version_upstreams b where b.version_id=selected.id),'[]'::jsonb));
 end $$;
+create or replace function public.bff_release_prepare_snapshot(
+  p_actor uuid,p_interface uuid,p_purpose text,p_version_id uuid default null)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare draft public.bff_interfaces; deployment public.bff_interface_deployments;
+  selected public.bff_interface_versions; snapshot jsonb; targets jsonb; permission text;
+  route_method text; route_path text; desired_shape text; conflict boolean;
+begin
+  if p_purpose not in ('publish','rollback','enable') then raise exception 'BFF_INVALID_OPERATION'; end if;
+  permission:=case p_purpose when 'publish' then 'BffRelease:Publish'
+    when 'rollback' then 'BffRelease:Rollback' else 'BffRelease:ChangeStatus' end;
+  perform public.bff_release_target(p_actor,p_interface,permission);
+  select * into draft from public.bff_interfaces where id=p_interface and deleted_at is null;
+  select * into deployment from public.bff_interface_deployments where interface_id=p_interface;
+  if p_purpose='publish' then
+    if p_version_id is not null then raise exception 'BFF_INVALID_OPERATION'; end if;
+    snapshot:=jsonb_build_object('applicationId',draft.application_id,'environment',draft.environment,
+      'code',draft.code,'name',draft.name,'description',draft.description,
+      'method',draft.method,'path',draft.path,'definition',draft.definition);
+  else
+    if p_purpose='enable' and p_version_id is not null or
+      p_purpose='rollback' and p_version_id is null then raise exception 'BFF_INVALID_OPERATION'; end if;
+    select * into selected from public.bff_interface_versions where id=case when p_purpose='enable'
+      then deployment.active_version_id else p_version_id end and interface_id=draft.id and
+      tenant_id=draft.tenant_id and application_id=draft.application_id and environment=draft.environment;
+    if selected.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+    snapshot:=jsonb_build_object('applicationId',selected.application_id,'environment',selected.environment,
+      'code',selected.code,'name',selected.name,'description',selected.description,
+      'method',selected.method,'path',selected.path,'definition',selected.definition);
+  end if;
+  route_method:=snapshot->>'method'; route_path:=snapshot->>'path';
+  desired_shape:=pg_catalog.regexp_replace(route_path,'\{[A-Za-z][A-Za-z0-9_]*\}','{}','g');
+  select exists(select 1 from public.bff_interface_deployments d where d.tenant_id=draft.tenant_id and
+    d.application_id=draft.application_id and d.environment=draft.environment and d.enabled and
+    d.method=route_method and d.route_shape=desired_shape and d.interface_id<>draft.id) into conflict;
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'stepKey',step.value->>'key','id',coalesce(b.service_id,vb.service_id),
+    'configVersion',coalesce(b.config_version,vb.config_version),
+    'currentConfigVersion',u.config_version,'credentialVersion',u.credential_version,
+    'baseUrl',rev.base_url,'timeoutMs',rev.timeout_ms,'authType',rev.auth_type,'headerName',rev.header_name,
+    'credential',case when readiness.code='ready' and rev.auth_type<>'none' then
+      jsonb_build_object('ciphertext',c.ciphertext,'keyId',c.key_id,'version',c.credential_version)
+      else null end,'readinessCode',readiness.code) order by step.ordinality),'[]'::jsonb)
+    into targets
+  from jsonb_array_elements(snapshot->'definition'->'steps') with ordinality as step(value,ordinality)
+  left join public.bff_interface_upstreams b on p_purpose='publish' and b.interface_id=draft.id and
+    b.tenant_id=draft.tenant_id and b.application_id=draft.application_id and
+    b.environment=draft.environment and b.step_key=step.value->>'key'
+  left join public.bff_interface_version_upstreams vb on p_purpose<>'publish' and
+    vb.version_id=selected.id and vb.interface_id=draft.id and vb.tenant_id=draft.tenant_id and
+    vb.application_id=draft.application_id and vb.environment=draft.environment and vb.step_key=step.value->>'key'
+  left join public.bff_upstream_services u on u.id=coalesce(b.service_id,vb.service_id) and
+    u.tenant_id=draft.tenant_id and u.application_id=draft.application_id and u.environment=draft.environment
+  left join public.bff_upstream_service_revisions rev on rev.service_id=coalesce(b.service_id,vb.service_id) and
+    rev.config_version=coalesce(b.config_version,vb.config_version) and rev.tenant_id=draft.tenant_id and
+    rev.application_id=draft.application_id and rev.environment=draft.environment
+  left join public.bff_upstream_credentials c on c.service_id=u.id and c.tenant_id=u.tenant_id and
+    c.application_id=u.application_id and c.credential_version=u.credential_version
+  left join public.bff_applications a on a.id=draft.application_id and a.tenant_id=draft.tenant_id
+  cross join lateral (select case
+    when coalesce(b.service_id,vb.service_id) is null or u.id is null then 'missing'
+    when u.deleted_at is not null or u.status<>'active' or not a.enabled then 'inactive'
+    when rev.service_id is null or u.auth_type<>rev.auth_type or u.header_name<>rev.header_name or
+      (p_purpose='publish' and u.config_version<>b.config_version) or
+      (p_purpose<>'publish' and (vb.auth_type<>rev.auth_type or vb.header_name<>rev.header_name))
+      then 'incompatible'
+    when rev.auth_type<>'none' and c.service_id is null then 'credential_missing'
+    else 'ready' end as code) readiness;
+  return jsonb_build_object('record',public.bff_release_record(draft.id),'snapshot',snapshot,
+    'validatedVersion',case when p_purpose='publish' then draft.validated_version else null end,
+    'lastTestUpstreams',case when p_purpose='publish' then draft.last_test_upstreams else '[]'::jsonb end,
+    'routeConflict',conflict,'targets',targets);
+end $$;
 create or replace function public.bff_release_targets_ready(
   p_interface uuid,p_version_id uuid,p_observed jsonb,p_publish boolean)
 returns boolean language plpgsql stable security invoker set search_path='' as $$
@@ -2708,7 +3349,7 @@ begin
         existing.version_id<>p_version_id or existing.deployment_version<>p_deployment_version
       then raise exception 'BFF_IDEMPOTENCY_CONFLICT'; end if;
       if existing.status='running' and existing.expires_at<=now() then
-        update public.bff_interface_calls set status='unknown',finished_at=now(),error_code='LEASE_EXPIRED',
+        update public.bff_interface_calls set status='unknown',finished_at=now(),error_code='LEASE_EXPIRED',error_class='unknown',
           result_payload=null,result_expires_at=null where request_id=existing.request_id;
         return jsonb_build_object('kind','unknown','requestId',existing.request_id,
           'versionNumber',publication->'versionNumber');
@@ -2725,7 +3366,7 @@ begin
         'versionNumber',publication->'versionNumber');
     end if;
   end if;
-  update public.bff_interface_calls set status='unknown',finished_at=now(),error_code='LEASE_EXPIRED',
+  update public.bff_interface_calls set status='unknown',finished_at=now(),error_code='LEASE_EXPIRED',error_class='unknown',
     result_payload=null,result_expires_at=null
     where tenant_id=actor.tenant_id and status='running' and expires_at<=now();
   update public.bff_interface_calls set result_payload=null,result_expires_at=null
@@ -2744,10 +3385,11 @@ begin
   return jsonb_build_object('kind','started','requestId',p_request_id,
     'versionNumber',publication->'versionNumber');
 end $$;
+drop function if exists public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text,jsonb);
 drop function if exists public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text);
 create or replace function public.bff_gateway_finish(
   p_actor uuid,p_request_id uuid,p_success boolean,p_http_status integer,p_duration_ms integer,
-  p_error_code text,p_steps jsonb,p_result_payload text,p_upstream_versions jsonb)
+  p_error_code text,p_steps jsonb,p_result_payload text,p_upstream_versions jsonb,p_error_class text default null)
 returns jsonb language plpgsql security invoker set search_path='' as $$
 declare actor public.bff_members; call_record public.bff_interface_calls; deployment public.bff_interface_deployments;
   stale boolean; item jsonb; observed_id uuid; pinned integer; current_config integer; credential integer;
@@ -2758,12 +3400,30 @@ begin
     jsonb_array_length(p_steps)>8 or
     jsonb_typeof(p_upstream_versions) is distinct from 'array' or jsonb_array_length(p_upstream_versions)>8 or
     (p_error_code is not null and (length(p_error_code)>80 or p_error_code !~ '^[A-Z][A-Z0-9_]*$')) or
-    (p_result_payload is not null and length(p_result_payload)>131072)
+    (p_result_payload is not null and length(p_result_payload)>131072) or
+    (p_error_class is not null and p_error_class not in
+      ('timeout','upstream','unknown','authorization','validation','rate_limited')) or
+    (p_success and p_error_class is not null)
   then raise exception 'BFF_INVALID_RESULT'; end if;
   for item in select value from jsonb_array_elements(p_steps) loop
     if jsonb_typeof(item) is distinct from 'object' or
       exists(select 1 from jsonb_object_keys(item) as key(name)
-        where key.name not in ('key','name','status','statusCode','durationMs','code'))
+        where key.name not in ('key','name','status','statusCode','durationMs','code','errorClass')) or
+      jsonb_typeof(item->'key') is distinct from 'string' or
+      coalesce(item->>'key','') !~ '^[A-Za-z][A-Za-z0-9_-]{0,63}$' or
+      (item ? 'name' and (jsonb_typeof(item->'name') is distinct from 'string' or length(item->>'name')>100)) or
+      jsonb_typeof(item->'status') is distinct from 'string' or
+      item->>'status' not in ('passed','failed','skipped') or
+      (item ? 'statusCode' and item->'statusCode'<>'null'::jsonb and (jsonb_typeof(item->'statusCode') is distinct from 'number' or
+        (item->>'statusCode')::numeric not between 100 and 599 or
+        (item->>'statusCode')::numeric<>trunc((item->>'statusCode')::numeric))) or
+      (item ? 'durationMs' and (jsonb_typeof(item->'durationMs') is distinct from 'number' or
+        (item->>'durationMs')::numeric not between 0 and 60000 or
+        (item->>'durationMs')::numeric<>trunc((item->>'durationMs')::numeric))) or
+      (item ? 'code' and item->'code'<>'null'::jsonb and (jsonb_typeof(item->'code') is distinct from 'string' or
+        length(item->>'code')>80 or item->>'code' !~ '^[A-Z][A-Z0-9_]*$')) or
+      (item ? 'errorClass' and item->'errorClass'<>'null'::jsonb and (jsonb_typeof(item->'errorClass') is distinct from 'string' or
+        item->>'errorClass' not in ('timeout','upstream','unknown','authorization','validation','rate_limited')))
     then raise exception 'BFF_INVALID_RESULT'; end if;
   end loop;
   select * into actor from public.bff_members where id=p_actor;
@@ -2815,44 +3475,648 @@ begin
       where version_id=call_record.version_id and interface_id=call_record.interface_id)
   then stale:=true; end if;
   if stale then
-    update public.bff_interface_calls set status='unknown',finished_at=now(),error_code='STALE_DEPLOYMENT',
+    update public.bff_interface_calls set status='unknown',finished_at=now(),error_code='STALE_DEPLOYMENT',error_class='unknown',
       result_payload=null,result_expires_at=null where request_id=p_request_id;
     return jsonb_build_object('stale',true);
   end if;
   if p_success and (p_result_payload is null or p_error_code is not null) or
     not p_success and p_result_payload is not null then raise exception 'BFF_INVALID_RESULT'; end if;
   update public.bff_interface_calls set status=case when p_success then 'succeeded' else 'failed' end,
-    finished_at=now(),duration_ms=p_duration_ms,http_status=p_http_status,error_code=p_error_code,
+    finished_at=now(),duration_ms=p_duration_ms,http_status=p_http_status,error_code=p_error_code,error_class=p_error_class,
     steps=p_steps,result_payload=case when p_success then p_result_payload else null end,
     result_expires_at=case when p_success then now()+interval '15 minutes' else null end
     where request_id=p_request_id;
   return jsonb_build_object('stale',false);
 end $$;
+create or replace function public.bff_call_public(p_request_id uuid)
+returns jsonb language sql stable security invoker set search_path='' as $$
+select jsonb_build_object(
+  'requestId',c.request_id,'applicationId',c.application_id,'applicationName',a.name,
+  'environment',c.environment,'interfaceId',c.interface_id,'interfaceName',v.name,
+  'versionNumber',v.number,'method',c.method,'pathTemplate',c.path_template,
+  'startedAt',c.started_at,'finishedAt',c.finished_at,'durationMs',c.duration_ms,
+  'status',c.status,'httpStatus',c.http_status,'errorCode',c.error_code,'errorClass',c.error_class,
+  'steps',coalesce((select jsonb_agg(jsonb_build_object(
+    'key',s.value->>'key','status',s.value->>'status',
+    'statusCode',case when jsonb_typeof(s.value->'statusCode')='number' then s.value->'statusCode' else 'null'::jsonb end,
+    'durationMs',case when jsonb_typeof(s.value->'durationMs')='number' then s.value->'durationMs' else 'null'::jsonb end,
+    'code',s.value->>'code',
+    'errorClass',case when s.value->>'errorClass' in ('timeout','upstream','unknown','authorization','validation','rate_limited')
+      then s.value->>'errorClass' else null end) order by s.ordinality)
+    from jsonb_array_elements(c.steps) with ordinality as s(value,ordinality)),'[]'::jsonb))
+from public.bff_interface_calls c
+join public.bff_applications a on a.id=c.application_id and a.tenant_id=c.tenant_id
+join public.bff_interface_versions v on v.id=c.version_id and v.tenant_id=c.tenant_id and v.interface_id=c.interface_id
+where c.request_id=p_request_id
+$$;
+create or replace function public.bff_call_window(p_filters jsonb)
+returns tstzrange language plpgsql stable security invoker set search_path='' as $$
+declare from_at timestamptz; to_at timestamptz;
+begin
+  if p_filters is null or jsonb_typeof(p_filters)<>'object' then raise exception 'BFF_INVALID_FILTER'; end if;
+  begin
+    to_at:=coalesce(nullif(p_filters->>'to','')::timestamptz,now());
+    from_at:=coalesce(nullif(p_filters->>'from','')::timestamptz,to_at-interval '24 hours');
+  exception when others then raise exception 'BFF_INVALID_FILTER'; end;
+  if from_at>=to_at or to_at>now()+interval '1 minute' or to_at-from_at>interval '30 days'
+  then raise exception 'BFF_INVALID_FILTER'; end if;
+  return tstzrange(from_at,to_at,'[)');
+end $$;
+create or replace function public.bff_read_calls(p_actor uuid,p_filters jsonb default '{}'::jsonb)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; bounds tstzrange; page integer; size integer; total integer;
+  records jsonb; summary jsonb; filter_app uuid; filter_interface uuid; filter_request uuid;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffCall:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  bounds:=public.bff_call_window(p_filters);
+  begin
+    page:=coalesce(nullif(p_filters->>'current','')::integer,1);
+    size:=coalesce(nullif(p_filters->>'size','')::integer,20);
+    filter_app:=nullif(p_filters->>'applicationId','')::uuid;
+    filter_interface:=nullif(p_filters->>'interfaceId','')::uuid;
+    filter_request:=nullif(p_filters->>'requestId','')::uuid;
+  exception when others then raise exception 'BFF_INVALID_FILTER'; end;
+  if page not between 1 and 100000 or size not between 1 and 100 or
+    (p_filters ? 'environment' and nullif(p_filters->>'environment','') is not null and
+      p_filters->>'environment' not in ('development','staging','production')) or
+    (p_filters ? 'status' and nullif(p_filters->>'status','') is not null and
+      p_filters->>'status' not in ('running','succeeded','failed','unknown')) or
+    (p_filters ? 'method' and nullif(p_filters->>'method','') is not null and
+      p_filters->>'method' not in ('GET','POST','PUT','PATCH','DELETE')) or
+    (p_filters ? 'errorClass' and nullif(p_filters->>'errorClass','') is not null and
+      p_filters->>'errorClass' not in ('timeout','upstream','unknown','authorization','validation','rate_limited','unclassified'))
+  then raise exception 'BFF_INVALID_FILTER'; end if;
+  with scoped as (
+    select c.request_id,c.status,c.error_class from public.bff_interface_calls c
+    where c.tenant_id=actor.tenant_id and c.started_at<@bounds and
+      public.bff_interface_scope(p_actor,c.application_id,'BffCall:View') and
+      (filter_app is null or c.application_id=filter_app) and
+      (filter_interface is null or c.interface_id=filter_interface) and
+      (filter_request is null or c.request_id=filter_request) and
+      (nullif(p_filters->>'environment','') is null or c.environment=p_filters->>'environment') and
+      (nullif(p_filters->>'status','') is null or c.status=p_filters->>'status') and
+      (nullif(p_filters->>'method','') is null or c.method=p_filters->>'method') and
+      (nullif(p_filters->>'errorClass','') is null or
+        (p_filters->>'errorClass'='unclassified' and c.error_class is null) or c.error_class=p_filters->>'errorClass')
+  ) select count(*),jsonb_build_object('total',count(*),
+      'running',count(*) filter(where status='running'),
+      'succeeded',count(*) filter(where status='succeeded'),
+      'failed',count(*) filter(where status='failed'),
+      'unknown',count(*) filter(where status='unknown'),
+      'timeout',count(*) filter(where error_class='timeout')) into total,summary from scoped;
+  select coalesce(jsonb_agg(public.bff_call_public(q.request_id) order by q.started_at desc,q.request_id desc),'[]'::jsonb)
+    into records from (select c.request_id,c.started_at from public.bff_interface_calls c
+      where c.tenant_id=actor.tenant_id and c.started_at<@bounds and
+        public.bff_interface_scope(p_actor,c.application_id,'BffCall:View') and
+        (filter_app is null or c.application_id=filter_app) and
+        (filter_interface is null or c.interface_id=filter_interface) and
+        (filter_request is null or c.request_id=filter_request) and
+        (nullif(p_filters->>'environment','') is null or c.environment=p_filters->>'environment') and
+        (nullif(p_filters->>'status','') is null or c.status=p_filters->>'status') and
+        (nullif(p_filters->>'method','') is null or c.method=p_filters->>'method') and
+        (nullif(p_filters->>'errorClass','') is null or
+          (p_filters->>'errorClass'='unclassified' and c.error_class is null) or c.error_class=p_filters->>'errorClass')
+      order by c.started_at desc,c.request_id desc limit size offset (page-1)*size) q;
+  return jsonb_build_object('records',records,'total',total,'current',page,'size',size,'summary',summary);
+end $$;
+create or replace function public.bff_call_detail(p_actor uuid,p_request_id uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare target public.bff_interface_calls;
+begin
+  select * into target from public.bff_interface_calls where request_id=p_request_id and
+    tenant_id=(select tenant_id from public.bff_members where id=p_actor and enabled);
+  if target.request_id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if not public.bff_interface_scope(p_actor,target.application_id,'BffCall:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  return public.bff_call_public(p_request_id);
+end $$;
+create or replace function public.bff_call_options(p_actor uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffCall:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  return jsonb_build_object(
+    'applications',coalesce((select jsonb_agg(jsonb_build_object('id',a.id,'code',a.code,'name',a.name,'enabled',a.enabled) order by a.name,a.id)
+      from public.bff_applications a where a.tenant_id=actor.tenant_id and
+        public.bff_interface_scope(p_actor,a.id,'BffCall:View')),'[]'::jsonb),
+    'environments',jsonb_build_array(jsonb_build_object('value','development','label','开发'),
+      jsonb_build_object('value','staging','label','预发'),jsonb_build_object('value','production','label','生产')),
+    'interfaces',coalesce((select jsonb_agg(jsonb_build_object('id',i.id,'applicationId',i.application_id,
+      'environment',i.environment,'code',i.code,'name',i.name) order by i.name,i.id)
+      from public.bff_interfaces i where i.tenant_id=actor.tenant_id and
+        public.bff_interface_scope(p_actor,i.application_id,'BffCall:View')),'[]'::jsonb),
+    'statuses',jsonb_build_array(jsonb_build_object('value','running','label','执行中'),
+      jsonb_build_object('value','succeeded','label','成功'),jsonb_build_object('value','failed','label','失败'),
+      jsonb_build_object('value','unknown','label','结果未知')),
+    'errorClasses',jsonb_build_array(jsonb_build_object('value','timeout','label','超时'),
+      jsonb_build_object('value','upstream','label','上游故障'),jsonb_build_object('value','unknown','label','未知'),
+      jsonb_build_object('value','authorization','label','授权'),jsonb_build_object('value','validation','label','校验'),
+      jsonb_build_object('value','rate_limited','label','限流'),jsonb_build_object('value','unclassified','label','未分类')));
+end $$;
+create or replace function public.bff_alert_rule_public(p_rule uuid)
+returns jsonb language sql stable security invoker set search_path='' as $$
+select jsonb_build_object('id',r.id,'applicationId',r.application_id,'applicationName',a.name,
+  'environment',r.environment,'interfaceId',r.interface_id,'interfaceName',i.name,
+  'name',r.name,'metric',r.metric,'windowMinutes',r.window_minutes,'threshold',r.threshold,
+  'minCalls',r.min_calls,'severity',r.severity,'enabled',r.enabled,'quietMinutes',r.quiet_minutes,
+  'version',r.version,'archivedAt',r.archived_at,'lastEvaluatedAt',r.last_evaluated_at,
+  'createdAt',r.created_at,'updatedAt',r.updated_at)
+from public.bff_alert_rules r
+join public.bff_applications a on a.id=r.application_id and a.tenant_id=r.tenant_id
+left join public.bff_interfaces i on i.id=r.interface_id and i.tenant_id=r.tenant_id
+where r.id=p_rule
+$$;
+create or replace function public.bff_alert_instance_public(p_instance uuid)
+returns jsonb language sql stable security invoker set search_path='' as $$
+select jsonb_build_object('id',n.id,'ruleId',n.rule_id,'ruleName',r.name,
+  'applicationId',n.application_id,'applicationName',a.name,'environment',n.environment,
+  'interfaceId',n.interface_id,'interfaceName',i.name,'metric',n.metric,'severity',n.severity,
+  'state',n.state,'observedValue',n.observed_value,'knownCalls',n.known_calls,
+  'failedCalls',n.failed_calls,'unknownCalls',n.unknown_calls,
+  'windowStartedAt',n.window_started_at,'windowEndedAt',n.window_ended_at,
+  'openedAt',n.opened_at,'acknowledgedAt',n.acknowledged_at,
+  'acknowledgedByName',m.display_name,'recoveredAt',n.recovered_at,'closedAt',n.closed_at,
+  'closedReason',n.closed_reason,'version',n.version,'lastObservedAt',n.last_observed_at)
+from public.bff_alert_instances n
+join public.bff_alert_rules r on r.id=n.rule_id and r.tenant_id=n.tenant_id
+join public.bff_applications a on a.id=n.application_id and a.tenant_id=n.tenant_id
+left join public.bff_interfaces i on i.id=n.interface_id and i.tenant_id=n.tenant_id
+left join public.bff_members m on m.id=n.acknowledged_by and m.tenant_id=n.tenant_id
+where n.id=p_instance
+$$;
+create or replace function public.bff_read_alert_rules(p_actor uuid,p_filters jsonb default '{}'::jsonb)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; page integer; size integer; filter_app uuid; filter_interface uuid; filter_rule uuid;
+  total integer; summary jsonb; records jsonb; archived boolean;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffAlertRule:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_filters is null or jsonb_typeof(p_filters)<>'object' then raise exception 'BFF_INVALID_FILTER'; end if;
+  begin
+    page:=coalesce(nullif(p_filters->>'current','')::integer,1);
+    size:=coalesce(nullif(p_filters->>'size','')::integer,20);
+    filter_app:=nullif(p_filters->>'applicationId','')::uuid;
+    filter_interface:=nullif(p_filters->>'interfaceId','')::uuid;
+    filter_rule:=nullif(p_filters->>'ruleId','')::uuid;
+    archived:=coalesce(nullif(p_filters->>'archived','')::boolean,false);
+  exception when others then raise exception 'BFF_INVALID_FILTER'; end;
+  if page not between 1 and 100000 or size not between 1 and 100 or
+    (nullif(p_filters->>'environment','') is not null and p_filters->>'environment' not in ('development','staging','production')) or
+    (nullif(p_filters->>'metric','') is not null and p_filters->>'metric' not in ('failure_count','failure_rate','timeout_count','unknown_count')) or
+    (nullif(p_filters->>'severity','') is not null and p_filters->>'severity' not in ('warning','critical')) or
+    (nullif(p_filters->>'enabled','') is not null and p_filters->>'enabled' not in ('true','false')) or
+    length(coalesce(p_filters->>'name',''))>100
+  then raise exception 'BFF_INVALID_FILTER'; end if;
+  with scoped as (
+    select r.id,r.enabled,r.archived_at from public.bff_alert_rules r
+    where r.tenant_id=actor.tenant_id and public.bff_interface_scope(p_actor,r.application_id,'BffAlertRule:View') and
+      (filter_app is null or r.application_id=filter_app) and (filter_interface is null or r.interface_id=filter_interface) and
+      (filter_rule is null or r.id=filter_rule) and
+      (archived=(r.archived_at is not null)) and
+      (nullif(p_filters->>'environment','') is null or r.environment=p_filters->>'environment') and
+      (nullif(p_filters->>'metric','') is null or r.metric=p_filters->>'metric') and
+      (nullif(p_filters->>'severity','') is null or r.severity=p_filters->>'severity') and
+      (nullif(p_filters->>'enabled','') is null or r.enabled=(p_filters->>'enabled')::boolean) and
+      (nullif(p_filters->>'name','') is null or lower(r.name) like '%'||lower(p_filters->>'name')||'%')
+  ) select count(*),jsonb_build_object('total',count(*),
+      'enabled',count(*) filter(where enabled and archived_at is null),
+      'disabled',count(*) filter(where not enabled and archived_at is null),
+      'archived',count(*) filter(where archived_at is not null)) into total,summary from scoped;
+  select coalesce(jsonb_agg(public.bff_alert_rule_public(q.id) order by q.created_at desc,q.id desc),'[]'::jsonb)
+    into records from (select r.id,r.created_at from public.bff_alert_rules r
+      where r.tenant_id=actor.tenant_id and public.bff_interface_scope(p_actor,r.application_id,'BffAlertRule:View') and
+        (filter_app is null or r.application_id=filter_app) and (filter_interface is null or r.interface_id=filter_interface) and
+        (filter_rule is null or r.id=filter_rule) and (archived=(r.archived_at is not null)) and
+        (nullif(p_filters->>'environment','') is null or r.environment=p_filters->>'environment') and
+        (nullif(p_filters->>'metric','') is null or r.metric=p_filters->>'metric') and
+        (nullif(p_filters->>'severity','') is null or r.severity=p_filters->>'severity') and
+        (nullif(p_filters->>'enabled','') is null or r.enabled=(p_filters->>'enabled')::boolean) and
+        (nullif(p_filters->>'name','') is null or lower(r.name) like '%'||lower(p_filters->>'name')||'%')
+      order by r.created_at desc,r.id desc limit size offset (page-1)*size) q;
+  return jsonb_build_object('records',records,'total',total,'current',page,'size',size,'summary',summary);
+end $$;
+create or replace function public.bff_read_alert_instances(p_actor uuid,p_filters jsonb default '{}'::jsonb)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; page integer; size integer; filter_app uuid; filter_interface uuid; filter_rule uuid;
+  filter_instance uuid; bounds tstzrange; explicit_bounds boolean; total integer; summary jsonb; records jsonb;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffAlert:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_filters is null or jsonb_typeof(p_filters)<>'object' then raise exception 'BFF_INVALID_FILTER'; end if;
+  explicit_bounds:=nullif(p_filters->>'from','') is not null or nullif(p_filters->>'to','') is not null;
+  if explicit_bounds then bounds:=public.bff_call_window(p_filters); end if;
+  begin
+    page:=coalesce(nullif(p_filters->>'current','')::integer,1);
+    size:=coalesce(nullif(p_filters->>'size','')::integer,20);
+    filter_app:=nullif(p_filters->>'applicationId','')::uuid;
+    filter_interface:=nullif(p_filters->>'interfaceId','')::uuid;
+    filter_rule:=nullif(p_filters->>'ruleId','')::uuid;
+    filter_instance:=nullif(p_filters->>'instanceId','')::uuid;
+  exception when others then raise exception 'BFF_INVALID_FILTER'; end;
+  if page not between 1 and 100000 or size not between 1 and 100 or
+    (nullif(p_filters->>'environment','') is not null and p_filters->>'environment' not in ('development','staging','production')) or
+    (nullif(p_filters->>'state','') is not null and p_filters->>'state' not in ('open','acknowledged','recovered','closed')) or
+    (nullif(p_filters->>'severity','') is not null and p_filters->>'severity' not in ('warning','critical'))
+  then raise exception 'BFF_INVALID_FILTER'; end if;
+  with scoped as (
+    select n.id,n.state from public.bff_alert_instances n
+    where n.tenant_id=actor.tenant_id and
+      (case when explicit_bounds then n.opened_at<@bounds else
+        n.state in ('open','acknowledged') or coalesce(n.recovered_at,n.closed_at,n.opened_at)>=now()-interval '30 days' end) and
+      public.bff_interface_scope(p_actor,n.application_id,'BffAlert:View') and
+      (filter_app is null or n.application_id=filter_app) and (filter_interface is null or n.interface_id=filter_interface) and
+      (filter_rule is null or n.rule_id=filter_rule) and (filter_instance is null or n.id=filter_instance) and
+      (nullif(p_filters->>'environment','') is null or n.environment=p_filters->>'environment') and
+      (nullif(p_filters->>'state','') is null or n.state=p_filters->>'state') and
+      (nullif(p_filters->>'severity','') is null or n.severity=p_filters->>'severity')
+  ) select count(*),jsonb_build_object('total',count(*),
+      'open',count(*) filter(where state='open'),'acknowledged',count(*) filter(where state='acknowledged'),
+      'recovered',count(*) filter(where state='recovered'),'closed',count(*) filter(where state='closed'))
+    into total,summary from scoped;
+  select coalesce(jsonb_agg(public.bff_alert_instance_public(q.id) order by q.opened_at desc,q.id desc),'[]'::jsonb)
+    into records from (select n.id,n.opened_at from public.bff_alert_instances n
+      where n.tenant_id=actor.tenant_id and
+        (case when explicit_bounds then n.opened_at<@bounds else
+          n.state in ('open','acknowledged') or coalesce(n.recovered_at,n.closed_at,n.opened_at)>=now()-interval '30 days' end) and
+        public.bff_interface_scope(p_actor,n.application_id,'BffAlert:View') and
+        (filter_app is null or n.application_id=filter_app) and (filter_interface is null or n.interface_id=filter_interface) and
+        (filter_rule is null or n.rule_id=filter_rule) and (filter_instance is null or n.id=filter_instance) and
+        (nullif(p_filters->>'environment','') is null or n.environment=p_filters->>'environment') and
+        (nullif(p_filters->>'state','') is null or n.state=p_filters->>'state') and
+        (nullif(p_filters->>'severity','') is null or n.severity=p_filters->>'severity')
+      order by n.opened_at desc,n.id desc limit size offset (page-1)*size) q;
+  return jsonb_build_object('records',records,'total',total,'current',page,'size',size,'summary',summary);
+end $$;
+create or replace function public.bff_alert_detail(p_actor uuid,p_instance uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare target public.bff_alert_instances;
+begin
+  select * into target from public.bff_alert_instances where id=p_instance and
+    tenant_id=(select tenant_id from public.bff_members where id=p_actor and enabled);
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if not public.bff_interface_scope(p_actor,target.application_id,'BffAlert:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  return public.bff_alert_instance_public(p_instance);
+end $$;
+create or replace function public.bff_alert_options(p_actor uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+begin
+  if not (public.bff_actor_can(p_actor,'BffAlertRule:View') or public.bff_actor_can(p_actor,'BffAlert:View'))
+  then raise exception 'BFF_FORBIDDEN'; end if;
+  -- Rebuild scope using alert permission; call visibility need not be granted to alert operators.
+  return jsonb_build_object(
+    'applications',coalesce((select jsonb_agg(jsonb_build_object('id',a.id,'code',a.code,'name',a.name,'enabled',a.enabled) order by a.name,a.id)
+      from public.bff_applications a join public.bff_members m on m.id=p_actor and m.enabled and m.tenant_id=a.tenant_id
+      where public.bff_interface_scope(p_actor,a.id,'BffAlertRule:View') or
+        public.bff_interface_scope(p_actor,a.id,'BffAlert:View')),'[]'::jsonb),
+    'environments',jsonb_build_array(jsonb_build_object('value','development','label','开发'),
+      jsonb_build_object('value','staging','label','预发'),jsonb_build_object('value','production','label','生产')),
+    'interfaces',coalesce((select jsonb_agg(jsonb_build_object('id',i.id,'applicationId',i.application_id,
+      'environment',i.environment,'code',i.code,'name',i.name) order by i.name,i.id)
+      from public.bff_interfaces i join public.bff_members m on m.id=p_actor and m.enabled and m.tenant_id=i.tenant_id
+      where i.deleted_at is null and (public.bff_interface_scope(p_actor,i.application_id,'BffAlertRule:View') or
+        public.bff_interface_scope(p_actor,i.application_id,'BffAlert:View'))),'[]'::jsonb),
+    'metrics',jsonb_build_array(jsonb_build_object('value','failure_count','label','失败次数'),
+      jsonb_build_object('value','failure_rate','label','失败率'),
+      jsonb_build_object('value','timeout_count','label','超时次数'),
+      jsonb_build_object('value','unknown_count','label','结果未知次数')),
+    'severities',jsonb_build_array(jsonb_build_object('value','warning','label','警告'),
+      jsonb_build_object('value','critical','label','严重')),
+    'statuses',jsonb_build_array(jsonb_build_object('value','open','label','待处理'),
+      jsonb_build_object('value','acknowledged','label','已确认'),
+      jsonb_build_object('value','recovered','label','已恢复'),
+      jsonb_build_object('value','closed','label','已关闭')),
+    'errorClasses',jsonb_build_array(jsonb_build_object('value','timeout','label','超时'),
+      jsonb_build_object('value','unknown','label','未知')));
+end $$;
+create or replace function public.bff_write_alert_rule(
+  p_actor uuid,p_operation text,p_rule uuid,p_version integer,p_payload jsonb default '{}'::jsonb)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_alert_rules; app_id uuid; selected_interface uuid;
+  revision bigint; permission text; changed boolean; closed_count integer; next_enabled boolean;
+begin
+  if p_operation not in ('create','update','enable','disable','archive') or
+    p_payload is null or jsonb_typeof(p_payload)<>'object' or
+    exists(select 1 from jsonb_object_keys(p_payload) as k(name) where k.name not in
+      ('applicationId','environment','interfaceId','name','metric','windowMinutes','threshold','minCalls','severity','enabled','quietMinutes'))
+  then raise exception 'BFF_INVALID_ALERT'; end if;
+  permission:=case p_operation when 'create' then 'BffAlert:Add' when 'update' then 'BffAlert:Edit'
+    when 'archive' then 'BffAlert:Archive' else 'BffAlert:ChangeStatus' end;
+  revision:=public.bff_control_lock(p_actor,permission,'alerts');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if p_operation='create' then
+    if p_rule is not null or p_version is not null and p_version<>0 or
+      not (p_payload ?& array['applicationId','environment','name','metric','windowMinutes','threshold','minCalls','severity','enabled','quietMinutes'])
+    then raise exception 'BFF_INVALID_ALERT'; end if;
+    begin
+      app_id:=(p_payload->>'applicationId')::uuid;
+      selected_interface:=nullif(p_payload->>'interfaceId','')::uuid;
+    exception when others then raise exception 'BFF_INVALID_ALERT'; end;
+    if app_id is null or not public.bff_interface_scope(p_actor,app_id,permission) then raise exception 'BFF_FORBIDDEN'; end if;
+    if jsonb_typeof(p_payload->'enabled')<>'boolean' or
+      jsonb_typeof(p_payload->'windowMinutes')<>'number' or
+      jsonb_typeof(p_payload->'threshold')<>'number' or
+      jsonb_typeof(p_payload->'minCalls')<>'number' or
+      jsonb_typeof(p_payload->'quietMinutes')<>'number' or
+      p_payload->>'environment' not in ('development','staging','production') or
+      p_payload->>'metric' not in ('failure_count','failure_rate','timeout_count','unknown_count') or
+      p_payload->>'severity' not in ('warning','critical')
+    then raise exception 'BFF_INVALID_ALERT'; end if;
+    begin
+      insert into public.bff_alert_rules(tenant_id,application_id,environment,interface_id,name,
+        metric,window_minutes,threshold,min_calls,severity,enabled,quiet_minutes,created_by,updated_by)
+      values(actor.tenant_id,app_id,p_payload->>'environment',selected_interface,p_payload->>'name',
+        p_payload->>'metric',(p_payload->>'windowMinutes')::integer,(p_payload->>'threshold')::numeric,
+        (p_payload->>'minCalls')::integer,p_payload->>'severity',(p_payload->>'enabled')::boolean,
+        (p_payload->>'quietMinutes')::integer,p_actor,p_actor) returning * into saved;
+    exception when check_violation or foreign_key_violation or invalid_text_representation or numeric_value_out_of_range
+      then raise exception 'BFF_INVALID_ALERT'; end;
+  else
+    if p_rule is null or p_version is null or p_version<1 then raise exception 'BFF_INVALID_ALERT'; end if;
+    select * into saved from public.bff_alert_rules where id=p_rule and tenant_id=actor.tenant_id for update;
+    if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+    if saved.archived_at is not null then raise exception 'BFF_ALERT_ARCHIVED'; end if;
+    if not public.bff_interface_scope(p_actor,saved.application_id,permission) then raise exception 'BFF_FORBIDDEN'; end if;
+    if saved.version<>p_version then raise exception 'BFF_CONFLICT'; end if;
+    if p_operation='update' then
+      if not (p_payload ?& array['applicationId','environment','name','metric','windowMinutes','threshold','minCalls','severity','enabled','quietMinutes'])
+      then raise exception 'BFF_INVALID_ALERT'; end if;
+      begin
+        app_id:=(p_payload->>'applicationId')::uuid;
+        selected_interface:=nullif(p_payload->>'interfaceId','')::uuid;
+      exception when others then raise exception 'BFF_INVALID_ALERT'; end;
+      if app_id is distinct from saved.application_id or p_payload->>'environment' is distinct from saved.environment or
+        jsonb_typeof(p_payload->'enabled')<>'boolean' or
+        jsonb_typeof(p_payload->'windowMinutes')<>'number' or
+        jsonb_typeof(p_payload->'threshold')<>'number' or
+        jsonb_typeof(p_payload->'minCalls')<>'number' or
+        jsonb_typeof(p_payload->'quietMinutes')<>'number' or
+        p_payload->>'metric' not in ('failure_count','failure_rate','timeout_count','unknown_count') or
+        p_payload->>'severity' not in ('warning','critical')
+      then raise exception 'BFF_INVALID_ALERT'; end if;
+      begin
+        changed:=selected_interface is distinct from saved.interface_id or p_payload->>'metric' is distinct from saved.metric or
+          (p_payload->>'windowMinutes')::integer is distinct from saved.window_minutes or
+          (p_payload->>'threshold')::numeric is distinct from saved.threshold or
+          (p_payload->>'minCalls')::integer is distinct from saved.min_calls or
+          p_payload->>'severity' is distinct from saved.severity;
+        update public.bff_alert_rules set interface_id=selected_interface,name=p_payload->>'name',metric=p_payload->>'metric',
+          window_minutes=(p_payload->>'windowMinutes')::integer,threshold=(p_payload->>'threshold')::numeric,
+          min_calls=(p_payload->>'minCalls')::integer,severity=p_payload->>'severity',
+          enabled=(p_payload->>'enabled')::boolean,quiet_minutes=(p_payload->>'quietMinutes')::integer,
+          version=version+1,updated_by=p_actor,updated_at=now(),
+          last_evaluated_at=case when changed then null else last_evaluated_at end
+          where id=p_rule returning * into saved;
+      exception when check_violation or foreign_key_violation or invalid_text_representation or numeric_value_out_of_range
+        then raise exception 'BFF_INVALID_ALERT'; end;
+    else
+      if p_payload<>'{}'::jsonb then raise exception 'BFF_INVALID_ALERT'; end if;
+      next_enabled:=p_operation='enable';
+      update public.bff_alert_rules set enabled=next_enabled,
+        archived_at=case when p_operation='archive' then now() else archived_at end,
+        version=version+1,updated_by=p_actor,updated_at=now(),last_evaluated_at=null
+      where id=p_rule returning * into saved;
+    end if;
+    if p_operation in ('disable','archive') or (p_operation='update' and (changed or not saved.enabled)) then
+      update public.bff_alert_instances set state='closed',closed_at=now(),
+        closed_reason=case when p_operation='archive' then 'archived'
+          when p_operation='disable' or not saved.enabled then 'disabled' else 'reconfigured' end,
+        version=version+1,last_observed_at=now()
+      where rule_id=p_rule and state in ('open','acknowledged');
+      get diagnostics closed_count=row_count;
+    end if;
+  end if;
+  perform public.bff_control_advance(p_actor,'alerts','alert_rule.'||p_operation,saved.id,
+    jsonb_build_object('version',saved.version,'closedCount',coalesce(closed_count,0)));
+  return public.bff_alert_rule_public(saved.id);
+end $$;
+create or replace function public.bff_acknowledge_alert(p_actor uuid,p_instance uuid,p_version integer)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; target public.bff_alert_instances;
+begin
+  if p_instance is null or p_version is null or p_version<1 then raise exception 'BFF_INVALID_ALERT'; end if;
+  perform public.bff_control_lock(p_actor,'BffAlert:Acknowledge','alerts');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  select * into target from public.bff_alert_instances where id=p_instance and tenant_id=actor.tenant_id for update;
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if not public.bff_interface_scope(p_actor,target.application_id,'BffAlert:Acknowledge') then raise exception 'BFF_FORBIDDEN'; end if;
+  if target.version<>p_version then raise exception 'BFF_CONFLICT'; end if;
+  if target.state<>'open' then raise exception 'BFF_ALERT_STATE'; end if;
+  update public.bff_alert_instances set state='acknowledged',acknowledged_at=now(),
+    acknowledged_by=p_actor,version=version+1 where id=p_instance;
+  perform public.bff_control_advance(p_actor,'alerts','alert.acknowledge',p_instance,
+    jsonb_build_object('ruleId',target.rule_id));
+  return public.bff_alert_instance_public(p_instance);
+end $$;
+create or replace function public.bff_alert_evaluate_locked(p_rule uuid)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare rule public.bff_alert_rules; active public.bff_alert_instances; known_count integer;
+  failed_count integer; unknown_count integer; timeout_count integer; observed numeric(10,2);
+  triggered boolean; instance_id uuid; opened integer:=0; updated integer:=0; recovered integer:=0;
+  window_end timestamptz:=now();
+begin
+  select * into rule from public.bff_alert_rules where id=p_rule for update;
+  if rule.id is null or not rule.enabled or rule.archived_at is not null
+  then return jsonb_build_object('evaluated',0,'opened',0,'updated',0,'recovered',0,'closed',0,'instanceId',null); end if;
+  select count(*) filter(where c.status in ('succeeded','failed')),
+    count(*) filter(where c.status='failed'),count(*) filter(where c.status='unknown'),
+    count(*) filter(where c.status='failed' and c.error_class='timeout')
+    into known_count,failed_count,unknown_count,timeout_count
+    from public.bff_interface_calls c where c.tenant_id=rule.tenant_id and
+      c.application_id=rule.application_id and c.environment=rule.environment and
+      (rule.interface_id is null or c.interface_id=rule.interface_id) and
+      c.started_at>=window_end-pg_catalog.make_interval(mins=>rule.window_minutes) and c.started_at<window_end;
+  observed:=case rule.metric when 'failure_count' then failed_count
+    when 'timeout_count' then timeout_count when 'unknown_count' then unknown_count
+    else case when known_count=0 then 0 else round(100.0*failed_count/known_count,2) end end;
+  triggered:=observed>=rule.threshold and (rule.metric='unknown_count' or known_count>=rule.min_calls);
+  select * into active from public.bff_alert_instances where rule_id=rule.id and state in ('open','acknowledged') for update;
+  if triggered and active.id is null and
+    (rule.last_triggered_at is null or rule.last_triggered_at+pg_catalog.make_interval(mins=>rule.quiet_minutes)<=window_end)
+  then
+    insert into public.bff_alert_instances(rule_id,tenant_id,application_id,environment,interface_id,
+      metric,severity,state,observed_value,known_calls,failed_calls,unknown_calls,
+      window_started_at,window_ended_at,last_observed_at)
+    values(rule.id,rule.tenant_id,rule.application_id,rule.environment,rule.interface_id,
+      rule.metric,rule.severity,'open',observed,known_count,failed_count,unknown_count,
+      window_end-pg_catalog.make_interval(mins=>rule.window_minutes),window_end,window_end)
+    returning id into instance_id;
+    update public.bff_alert_rules set last_triggered_at=window_end where id=rule.id;
+    opened:=1;
+  elsif triggered and active.id is not null then
+    update public.bff_alert_instances set observed_value=observed,known_calls=known_count,
+      failed_calls=failed_count,unknown_calls=unknown_count,
+      window_started_at=window_end-pg_catalog.make_interval(mins=>rule.window_minutes),
+      window_ended_at=window_end,last_observed_at=window_end
+      where id=active.id;
+    instance_id:=active.id;
+    updated:=1;
+  elsif not triggered and active.id is not null then
+    update public.bff_alert_instances set state='recovered',recovered_at=window_end,
+      observed_value=observed,known_calls=known_count,failed_calls=failed_count,
+      unknown_calls=unknown_count,
+      window_started_at=window_end-pg_catalog.make_interval(mins=>rule.window_minutes),
+      window_ended_at=window_end,last_observed_at=window_end,version=version+1
+      where id=active.id;
+    instance_id:=active.id;
+    recovered:=1;
+  end if;
+  update public.bff_alert_rules set last_evaluated_at=window_end where id=rule.id;
+  return jsonb_build_object('evaluated',1,'opened',opened,'updated',updated,
+    'recovered',recovered,'closed',0,'instanceId',instance_id);
+end $$;
+create or replace function public.bff_alert_expire_calls(p_tenant uuid)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare expired integer; cleared integer;
+begin
+  update public.bff_interface_calls set status='unknown',finished_at=now(),
+    error_code='LEASE_EXPIRED',error_class='unknown',result_payload=null,result_expires_at=null
+    where request_id in (select request_id from public.bff_interface_calls
+      where tenant_id=p_tenant and status='running' and expires_at<=now()
+      order by expires_at,request_id limit 100 for update skip locked);
+  get diagnostics expired=row_count;
+  update public.bff_interface_calls set result_payload=null,result_expires_at=null
+    where request_id in (select request_id from public.bff_interface_calls
+      where tenant_id=p_tenant and result_payload is not null and result_expires_at<=now()
+      order by result_expires_at,request_id limit 100 for update skip locked);
+  get diagnostics cleared=row_count;
+  -- Operational metadata is retained for 90 days, well beyond the 60-minute
+  -- alert window and 15-minute replay cache. Alert instances retain aggregates,
+  -- not foreign keys to individual calls.
+  delete from public.bff_interface_calls where request_id in (
+    select request_id from public.bff_interface_calls
+    where tenant_id=p_tenant and status in ('succeeded','failed','unknown') and
+      started_at<now()-interval '90 days' and
+      (result_payload is null or result_expires_at<=now())
+    order by started_at,request_id limit 1000 for update skip locked);
+  return jsonb_build_object('expired',expired,'clearedReplay',cleared);
+end $$;
+create or replace function public.bff_evaluate_alert_rule(p_actor uuid,p_rule uuid)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; target public.bff_alert_rules; results jsonb; cleanup jsonb;
+begin
+  if p_rule is null then raise exception 'BFF_INVALID_ALERT'; end if;
+  perform public.bff_control_lock(p_actor,'BffAlert:Evaluate','alerts');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  select * into target from public.bff_alert_rules where id=p_rule and tenant_id=actor.tenant_id;
+  if target.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if not public.bff_interface_scope(p_actor,target.application_id,'BffAlert:Evaluate') then raise exception 'BFF_FORBIDDEN'; end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-gateway:'||actor.tenant_id::text,0));
+  cleanup:=public.bff_alert_expire_calls(actor.tenant_id);
+  results:=public.bff_alert_evaluate_locked(p_rule);
+  insert into public.bff_audit_events(tenant_id,actor_id,action,resource_type,resource_id,summary)
+    values(actor.tenant_id,p_actor,'alert.evaluate','alerts',p_rule,
+      jsonb_build_object('opened',results->'opened','recovered',results->'recovered'));
+  return results||cleanup;
+end $$;
+create or replace function public.bff_alert_evaluate_batch(p_limit integer default 100)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare candidate record; tenant_to_clean uuid; locked uuid; results jsonb; cleanup jsonb;
+  cleaned_tenants uuid[]:=array[]::uuid[];
+  evaluated integer:=0; opened integer:=0; updated integer:=0; recovered integer:=0;
+  expired integer:=0; cleared integer:=0; cleaned_count integer:=0;
+  scan_limit integer; rotation bigint;
+begin
+  if p_limit is null or p_limit not between 1 and 100 then raise exception 'BFF_INVALID_LIMIT'; end if;
+  scan_limit:=least(2000,greatest(100,p_limit*20));
+  rotation:=pg_catalog.floor(extract(epoch from now())/60)::bigint;
+  for tenant_to_clean in select tenant_id from public.bff_interface_calls
+    where (status='running' and expires_at<=now()) or
+      (result_payload is not null and result_expires_at<=now()) or
+      (status in ('succeeded','failed','unknown') and started_at<now()-interval '90 days')
+    group by tenant_id
+    order by pg_catalog.hashtextextended(tenant_id::text,rotation),tenant_id
+    limit scan_limit
+  loop
+    exit when cleaned_count>=p_limit;
+    if not pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||tenant_to_clean::text,0))
+    then continue; end if;
+    if not pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended('bff-gateway:'||tenant_to_clean::text,0))
+    then continue; end if;
+    cleanup:=public.bff_alert_expire_calls(tenant_to_clean);
+    expired:=expired+(cleanup->>'expired')::integer;
+    cleared:=cleared+(cleanup->>'clearedReplay')::integer;
+    cleaned_tenants:=pg_catalog.array_append(cleaned_tenants,tenant_to_clean);
+    cleaned_count:=cleaned_count+1;
+  end loop;
+  -- Offer each tenant its oldest rule before taking its second. Rotate ties so
+  -- a bounded scan cannot repeatedly favor the same locked tenants.
+  for candidate in select id,tenant_id from (
+    select r.id,r.tenant_id,r.last_evaluated_at,
+      row_number() over(partition by r.tenant_id order by r.last_evaluated_at nulls first,r.id) as tenant_rank
+    from public.bff_alert_rules r where r.enabled and r.archived_at is null
+  ) ranked
+    order by tenant_rank,pg_catalog.hashtextextended(tenant_id::text,rotation),
+      last_evaluated_at nulls first,id limit scan_limit
+  loop
+    exit when evaluated>=p_limit;
+    if not pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||candidate.tenant_id::text,0))
+    then continue; end if;
+    if not pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended('bff-gateway:'||candidate.tenant_id::text,0))
+    then continue; end if;
+    select id into locked from public.bff_alert_rules
+      where id=candidate.id and enabled and archived_at is null for update skip locked;
+    if locked is null then continue; end if;
+    if not(candidate.tenant_id=any(cleaned_tenants)) then
+      cleanup:=public.bff_alert_expire_calls(candidate.tenant_id);
+      expired:=expired+(cleanup->>'expired')::integer;
+      cleared:=cleared+(cleanup->>'clearedReplay')::integer;
+      cleaned_tenants:=pg_catalog.array_append(cleaned_tenants,candidate.tenant_id);
+    end if;
+    results:=public.bff_alert_evaluate_locked(locked);
+    evaluated:=evaluated+(results->>'evaluated')::integer;
+    opened:=opened+(results->>'opened')::integer;
+    updated:=updated+(results->>'updated')::integer;
+    recovered:=recovered+(results->>'recovered')::integer;
+  end loop;
+  return jsonb_build_object('evaluated',evaluated,'opened',opened,'updated',updated,
+    'recovered',recovered,'closed',0,'expired',expired,'clearedReplay',cleared);
+end $$;
 revoke all on function public.bff_release_scope(uuid,uuid,text),public.bff_release_record(uuid),
   public.bff_release_version_public(uuid),public.bff_release_history_unchecked(uuid,integer,integer,integer),
   public.bff_release_history(uuid,uuid,integer,integer,integer),public.bff_read_releases(uuid,jsonb),
   public.bff_release_options(uuid),public.bff_release_target(uuid,uuid,text),
-  public.bff_release_snapshot(uuid,uuid,uuid,text),public.bff_release_targets_ready(uuid,uuid,jsonb,boolean),
+  public.bff_release_snapshot(uuid,uuid,uuid,text),public.bff_release_prepare_snapshot(uuid,uuid,text,uuid),
+  public.bff_release_targets_ready(uuid,uuid,jsonb,boolean),
   public.bff_write_release(uuid,text,uuid,integer,integer,uuid,text,jsonb),
   public.bff_gateway_scope(uuid,uuid,text),public.bff_route_matches(text,text),
   public.bff_gateway_public(uuid),public.bff_gateway_candidates(uuid,text,text,text,text),
   public.bff_gateway_target(uuid,uuid,uuid,integer),
   public.bff_gateway_step_targets(uuid,uuid,uuid,integer,text[]),
   public.bff_gateway_begin(uuid,uuid,uuid,integer,uuid,text,text),
-  public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text,jsonb)
+  public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text,jsonb,text)
   from public,anon,authenticated;
 grant execute on function public.bff_release_scope(uuid,uuid,text),public.bff_release_record(uuid),
   public.bff_release_version_public(uuid),public.bff_release_history_unchecked(uuid,integer,integer,integer),
   public.bff_release_history(uuid,uuid,integer,integer,integer),public.bff_read_releases(uuid,jsonb),
   public.bff_release_options(uuid),public.bff_release_target(uuid,uuid,text),
-  public.bff_release_snapshot(uuid,uuid,uuid,text),public.bff_release_targets_ready(uuid,uuid,jsonb,boolean),
+  public.bff_release_snapshot(uuid,uuid,uuid,text),public.bff_release_prepare_snapshot(uuid,uuid,text,uuid),
+  public.bff_release_targets_ready(uuid,uuid,jsonb,boolean),
   public.bff_write_release(uuid,text,uuid,integer,integer,uuid,text,jsonb),
   public.bff_gateway_scope(uuid,uuid,text),public.bff_route_matches(text,text),
   public.bff_gateway_public(uuid),public.bff_gateway_candidates(uuid,text,text,text,text),
   public.bff_gateway_target(uuid,uuid,uuid,integer),
   public.bff_gateway_step_targets(uuid,uuid,uuid,integer,text[]),
   public.bff_gateway_begin(uuid,uuid,uuid,integer,uuid,text,text),
-  public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text,jsonb)
+  public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text,jsonb,text)
+  to service_role;
+revoke all on function public.bff_call_public(uuid),public.bff_call_window(jsonb),
+  public.bff_read_calls(uuid,jsonb),public.bff_call_detail(uuid,uuid),public.bff_call_options(uuid),
+  public.bff_alert_rule_public(uuid),public.bff_alert_instance_public(uuid),
+  public.bff_read_alert_rules(uuid,jsonb),public.bff_read_alert_instances(uuid,jsonb),
+  public.bff_alert_detail(uuid,uuid),public.bff_alert_options(uuid),
+  public.bff_write_alert_rule(uuid,text,uuid,integer,jsonb),public.bff_acknowledge_alert(uuid,uuid,integer),
+  public.bff_alert_evaluate_locked(uuid),public.bff_alert_expire_calls(uuid),
+  public.bff_evaluate_alert_rule(uuid,uuid),public.bff_alert_evaluate_batch(integer)
+  from public,anon,authenticated;
+grant execute on function public.bff_call_public(uuid),public.bff_call_window(jsonb),
+  public.bff_read_calls(uuid,jsonb),public.bff_call_detail(uuid,uuid),public.bff_call_options(uuid),
+  public.bff_alert_rule_public(uuid),public.bff_alert_instance_public(uuid),
+  public.bff_read_alert_rules(uuid,jsonb),public.bff_read_alert_instances(uuid,jsonb),
+  public.bff_alert_detail(uuid,uuid),public.bff_alert_options(uuid),
+  public.bff_write_alert_rule(uuid,text,uuid,integer,jsonb),public.bff_acknowledge_alert(uuid,uuid,integer),
+  public.bff_alert_evaluate_locked(uuid),public.bff_alert_expire_calls(uuid),
+  public.bff_evaluate_alert_rule(uuid,uuid),public.bff_alert_evaluate_batch(integer)
   to service_role;
 alter table public.bff_members enable row level security;
 alter table public.bff_applications enable row level security;
@@ -2879,6 +4143,9 @@ alter table public.bff_interface_version_upstreams enable row level security;
 alter table public.bff_interface_deployments enable row level security;
 alter table public.bff_interface_release_events enable row level security;
 alter table public.bff_interface_calls enable row level security;
+alter table public.bff_alert_rules enable row level security;
+alter table public.bff_alert_instances enable row level security;
+alter table public.bff_resources enable row level security;
 revoke all on public.bff_interface_versions,public.bff_interface_version_upstreams,
   public.bff_interface_deployments,public.bff_interface_release_events,public.bff_interface_calls
   from public,anon,authenticated;
@@ -2888,6 +4155,10 @@ revoke all on public.bff_interface_versions,public.bff_interface_version_upstrea
 grant select,insert,update,delete on public.bff_interface_versions,public.bff_interface_version_upstreams,
   public.bff_interface_deployments,public.bff_interface_release_events,public.bff_interface_calls
   to service_role;
+revoke all on public.bff_alert_rules,public.bff_alert_instances from public,anon,authenticated,service_role;
+grant select,insert,update,delete on public.bff_alert_rules,public.bff_alert_instances to service_role;
+revoke all on public.bff_resources from public,anon,authenticated,service_role;
+grant select,insert,update,delete on public.bff_resources to service_role;
 alter table public.bff_resource_revisions enable row level security;
 alter table public.bff_platform_settings enable row level security;
 revoke all on public.bff_platform_settings from public,anon,authenticated,service_role;
@@ -2901,4 +4172,123 @@ alter table public.bff_dictionary_items enable row level security;
 revoke all on public.bff_resource_revisions,public.bff_menus,public.bff_roles,public.bff_member_roles,public.bff_role_menus,public.bff_dictionary_types,public.bff_dictionary_items from public,anon,authenticated;
 revoke all on public.bff_resource_revisions,public.bff_menus,public.bff_roles,public.bff_member_roles,public.bff_role_menus,public.bff_dictionary_types,public.bff_dictionary_items from service_role;
 grant select,insert,update,delete on public.bff_resource_revisions,public.bff_menus,public.bff_roles,public.bff_member_roles,public.bff_role_menus,public.bff_dictionary_types,public.bff_dictionary_items to service_role;
+-- BEGIN BFF MODULE DICTIONARIES
+-- Protocol values are immutable built-ins. Labels, order and presentation remain configurable.
+do $bff_module_dictionaries$
+declare actor record; entry record; option record; parent uuid; dictionary uuid; affected integer; changed integer;
+begin
+  for actor in select distinct on (tenant_id) id,tenant_id from public.bff_members
+    where enabled and role='admin' order by tenant_id,created_at,id loop
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||actor.tenant_id::text,0));
+    changed:=0;
+    for entry in select * from (values
+      ('BffCommon','通用配置'),
+      ('BffApplicationManagement','应用管理'),
+      ('BffMemberManagement','成员管理'),
+      ('BffUpstreamManagement','上游服务'),
+      ('BffInterfaceManagement','接口编排'),
+      ('BffSystemConfiguration','系统配置')
+    ) as directories(code,name) loop
+      insert into public.bff_dictionary_types(tenant_id,node_type,name,code,builtin,create_by,update_by)
+        select actor.tenant_id,'directory',entry.name,entry.code,true,actor.id,actor.id
+        where not exists(select 1 from public.bff_dictionary_types
+          where tenant_id=actor.tenant_id and node_type='directory' and code=entry.code);
+      get diagnostics affected=row_count; changed:=changed+affected;
+    end loop;
+    for entry in select * from (values
+      ('commonBoolean','是否','BffCommon'),
+      ('bffRuntimeEnvironment','运行环境','BffCommon'),
+      ('sysWebsiteLanguage','网站语言','BffSystemConfiguration'),
+      ('sysCaptchaProvider','登录验证方式','BffSystemConfiguration'),
+      ('sysTurnstileSize','验证控件尺寸','BffSystemConfiguration'),
+      ('sysTurnstileTheme','验证控件主题','BffSystemConfiguration'),
+      ('sysWatermarkContentType','水印内容','BffSystemConfiguration'),
+      ('bffApplicationStatus','应用状态','BffApplicationManagement'),
+      ('bffMemberAccessStatus','成员访问状态','BffMemberManagement'),
+      ('bffMemberRole','平台身份','BffMemberManagement'),
+      ('bffUpstreamStatus','上游运行状态','BffUpstreamManagement'),
+      ('bffUpstreamAuthType','上游认证方式','BffUpstreamManagement'),
+      ('bffCredentialAction','凭据操作','BffUpstreamManagement'),
+      ('bffInterfaceMethod','接口请求方法','BffInterfaceManagement'),
+      ('bffInterfaceValidationStatus','接口验证状态','BffInterfaceManagement'),
+      ('bffInterfaceInputLocation','接口输入位置','BffInterfaceManagement'),
+      ('bffInterfaceValueType','接口字段类型','BffInterfaceManagement'),
+      ('bffInterfaceBindingSource','接口映射来源','BffInterfaceManagement')
+    ) as types(code,name,directory) loop
+      select id into parent from public.bff_dictionary_types
+        where tenant_id=actor.tenant_id and node_type='directory' and code=entry.directory;
+      insert into public.bff_dictionary_types(tenant_id,parent_id,node_type,name,code,builtin,create_by,update_by)
+        values(actor.tenant_id,parent,'dictionary',entry.name,entry.code,true,actor.id,actor.id)
+        on conflict (tenant_id,code) where node_type='dictionary' do nothing;
+      get diagnostics affected=row_count; changed:=changed+affected;
+    end loop;
+    for option in select * from (values
+      ('commonBoolean','true','是',1,'success'),('commonBoolean','false','否',2,'info'),
+      ('bffRuntimeEnvironment','development','开发环境',1,'info'),
+      ('bffRuntimeEnvironment','staging','预发布环境',2,'warning'),
+      ('bffRuntimeEnvironment','production','生产环境',3,'success'),
+      ('sysWebsiteLanguage','zh','简体中文',1,'info'),('sysWebsiteLanguage','en','English',2,'info'),
+      ('sysCaptchaProvider','turnstile','Cloudflare Turnstile',1,'info'),
+      ('sysTurnstileSize','normal','标准',1,'info'),('sysTurnstileSize','compact','紧凑',2,'info'),
+      ('sysTurnstileSize','flexible','自适应',3,'info'),('sysTurnstileSize','hidden','隐藏',4,'info'),
+      ('sysTurnstileTheme','auto','跟随系统',1,'info'),('sysTurnstileTheme','light','浅色',2,'info'),
+      ('sysTurnstileTheme','dark','深色',3,'info'),
+      ('sysWatermarkContentType','username','当前用户',1,'info'),
+      ('sysWatermarkContentType','username_time','用户与时间',2,'info'),
+      ('sysWatermarkContentType','site_name','系统名称',3,'primary'),
+      ('sysWatermarkContentType','custom','自定义内容',4,'warning'),
+      ('bffApplicationStatus','true','启用',1,'success'),
+      ('bffApplicationStatus','false','停用',2,'info'),
+      ('bffMemberAccessStatus','enabled','已启用',1,'success'),
+      ('bffMemberAccessStatus','disabled','已停用',2,'info'),
+      ('bffMemberRole','viewer','普通成员',1,'info'),
+      ('bffMemberRole','admin','平台管理员',2,'primary'),
+      ('bffUpstreamStatus','draft','草稿',1,'info'),
+      ('bffUpstreamStatus','active','已启用',2,'success'),
+      ('bffUpstreamStatus','disabled','已停用',3,'warning'),
+      ('bffUpstreamAuthType','none','无认证',1,'info'),
+      ('bffUpstreamAuthType','bearer','Bearer Token',2,'primary'),
+      ('bffUpstreamAuthType','api_key_header','API Key 请求头',3,'warning'),
+      ('bffCredentialAction','rotate','轮换凭据',1,'primary'),
+      ('bffCredentialAction','clear','清除凭据',2,'danger'),
+      ('bffInterfaceMethod','GET','GET',1,'info'),
+      ('bffInterfaceMethod','POST','POST',2,'info'),
+      ('bffInterfaceMethod','PUT','PUT',3,'info'),
+      ('bffInterfaceMethod','PATCH','PATCH',4,'info'),
+      ('bffInterfaceMethod','DELETE','DELETE',5,'info'),
+      ('bffInterfaceValidationStatus','unvalidated','待验证',1,'info'),
+      ('bffInterfaceValidationStatus','valid','已通过',2,'success'),
+      ('bffInterfaceValidationStatus','invalid','未通过',3,'danger'),
+      ('bffInterfaceInputLocation','path','路径参数',1,'info'),
+      ('bffInterfaceInputLocation','query','查询参数',2,'info'),
+      ('bffInterfaceInputLocation','body','请求体',3,'info'),
+      ('bffInterfaceValueType','string','文本',1,'info'),
+      ('bffInterfaceValueType','number','数字',2,'info'),
+      ('bffInterfaceValueType','boolean','布尔值',3,'info'),
+      ('bffInterfaceBindingSource','input','接口输入',1,'primary'),
+      ('bffInterfaceBindingSource','step','前序步骤',2,'success'),
+      ('bffInterfaceBindingSource','literal','固定值',3,'info')
+    ) as options(code,value,label,sort,tag) loop
+      select id into dictionary from public.bff_dictionary_types
+        where tenant_id=actor.tenant_id and node_type='dictionary' and code=option.code;
+      insert into public.bff_dictionary_items(tenant_id,type_id,label,value,sort,tag_type,builtin,create_by,update_by)
+        values(actor.tenant_id,dictionary,option.label,option.value,option.sort,option.tag,true,actor.id,actor.id)
+        on conflict (tenant_id,type_id,value) do nothing;
+      get diagnostics affected=row_count; changed:=changed+affected;
+    end loop;
+    select id into parent from public.bff_dictionary_types
+      where tenant_id=actor.tenant_id and node_type='directory' and code='BffSystemConfiguration';
+    update public.bff_dictionary_types t set parent_id=parent,version=version+1,update_by=actor.id,update_time=now()
+      where t.tenant_id=actor.tenant_id and t.node_type='dictionary'
+        and t.code in ('sysWatermarkContentType','sysWebsiteLanguage','sysCaptchaProvider','sysTurnstileSize','sysTurnstileTheme')
+        and exists(select 1 from public.bff_dictionary_types p
+          where p.id=t.parent_id and p.tenant_id=t.tenant_id and p.code='BffCommon');
+    get diagnostics affected=row_count; changed:=changed+affected;
+    if changed>0 then
+      perform public.bff_control_advance(actor.id,'dictionaries','dictionary.module_seed',null,
+        jsonb_build_object('changed',changed));
+    end if;
+  end loop;
+end $bff_module_dictionaries$;
+-- END BFF MODULE DICTIONARIES
 commit;

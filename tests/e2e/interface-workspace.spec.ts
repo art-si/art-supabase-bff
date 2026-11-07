@@ -1,3 +1,4 @@
+import { dictionarySnapshot } from '../fixtures/dictionaries'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
@@ -224,7 +225,7 @@ async function mockApi(page: Page, optionsDelayMs = 0): Promise<MockState> {
       return
     }
     if (url.pathname === '/api/control/dictionaries' && method === 'GET') {
-      await reply({ revision: 1, types: [], items: [] })
+      await reply(dictionarySnapshot())
       return
     }
     if (url.pathname === '/api/control/table-columns' && method === 'GET') {
@@ -321,12 +322,12 @@ async function mockApi(page: Page, optionsDelayMs = 0): Promise<MockState> {
       await reply(created, 201)
       return
     }
-    if (url.pathname === `/api/interfaces/${createdId}` && method === 'PUT') {
+    const editing = state.rows.find((row) => url.pathname === `/api/interfaces/${row.id}`)
+    if (editing && method === 'PUT') {
       const payload = body()
       const input = interfaceWrite(payload)
       state.writes.push({ method, path: url.pathname, body: payload })
-      const current = state.rows.find((row) => row.id === createdId)
-      if (!current) throw new Error('Synthetic created interface missing')
+      const current = editing
       const updated: InterfaceRecord = {
         ...current,
         ...input,
@@ -339,7 +340,7 @@ async function mockApi(page: Page, optionsDelayMs = 0): Promise<MockState> {
         lastTestVersion: null,
         lastTestAt: null
       }
-      state.rows = state.rows.map((row) => (row.id === createdId ? updated : row))
+      state.rows = state.rows.map((row) => (row.id === current.id ? updated : row))
       await reply(updated)
       return
     }
@@ -442,6 +443,37 @@ test('editing an existing interface opens before upstream options finish loading
   expect(state.errors).toEqual([])
 })
 
+test('mapping choices use configured dictionary labels and omit disabled items', async ({
+  page
+}) => {
+  const state = await mockApi(page)
+  const snapshot = dictionarySnapshot()
+  for (const item of snapshot.items) {
+    if (item.dictTypeTable.code !== 'bffInterfaceBindingSource') continue
+    if (item.value === 'step') item.label = '前序结果（字典验收）'
+    if (item.value === 'literal') item.status = '2'
+  }
+  await page.route('**/api/control/dictionaries*', (route) => route.fulfill({ json: snapshot }))
+  await page.goto('/interfaces')
+  await page
+    .getByRole('row')
+    .filter({ hasText: '验收示例：订单查询接口' })
+    .getByRole('button', { name: '编辑接口草稿' })
+    .click()
+  const editor = page.getByRole('dialog', { name: '编辑接口草稿' })
+  await editor.getByRole('tab', { name: /输出映射/ }).click()
+  await editor.getByLabel('对调用方公开的输出第 1 项来源').click()
+  await expect(
+    page.getByRole('option', { name: '前序结果（字典验收）', exact: true })
+  ).toBeVisible()
+  await expect(page.getByRole('option', { name: '固定值', exact: true })).toHaveCount(0)
+  await page.getByRole('option', { name: '前序结果（字典验收）', exact: true }).click()
+  await editor.getByRole('button', { name: '保存草稿' }).click()
+  await expect(editor).toHaveCount(0)
+  expect((state.writes[0].body.definition as InterfaceDefinition).outputs[0].source).toBe('step')
+  expect(state.errors).toEqual([])
+})
+
 test('two two-step drafts support filtering, empty result and recovery', async ({ page }) => {
   const state = await mockApi(page)
   await page.goto('/interfaces')
@@ -504,6 +536,8 @@ test('create, edit two steps, validate and test with invalid input and stale res
   await pathBindings.getByLabel('路径参数第 1 项变量名').fill('orderId')
   await editor.getByRole('tab', { name: /输出映射/ }).click()
   const outputs = editor.getByRole('region', { name: '对调用方公开的输出' })
+  mkdirSync(path.resolve('.artifacts/ui'), { recursive: true })
+  await page.screenshot({ path: '.artifacts/ui/interface-output-editor.png' })
   await outputs.getByRole('button', { name: '新增映射' }).click()
   await outputs.getByLabel('对调用方公开的输出第 2 项目标字段').fill('total')
   await outputs.getByLabel('对调用方公开的输出第 2 项来源').click()

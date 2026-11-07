@@ -1,40 +1,49 @@
 <template>
-  <section class="grid min-w-0 gap-3" :aria-label="label">
-    <div class="flex min-w-0 flex-wrap items-center justify-between gap-2">
-      <div class="min-w-0">
-        <ArtSectionTitle :show-line="false">{{ label }}</ArtSectionTitle>
-        <p class="mt-1 text-xs text-g-700">{{ description }}</p>
-      </div>
+  <ArtSectionCard
+    :title="label"
+    :subtitle="description"
+    :aria-label="label"
+    preserve-content-structure
+  >
+    <template #actions>
       <ElButton type="primary" plain :disabled="modelValue.length >= maxRows" @click="addBinding">
-        新增映射
+        <ArtSvgIcon icon="ri:add-line" />新增映射
       </ElButton>
+    </template>
+    <div class="grid min-w-0 gap-3">
+      <p v-if="!modelValue.length" class="text-sm text-g-700">暂无映射，按需添加。</p>
+      <ArtSectionCard
+        v-for="(binding, index) in modelValue"
+        :key="index"
+        :title="`映射 ${index + 1}`"
+        preserve-content-structure
+      >
+        <template #actions>
+          <ElButton link type="danger" @click="removeBinding(index)"
+            ><ArtSvgIcon icon="ri:delete-bin-line" />移除</ElButton
+          >
+        </template>
+        <ArtForm
+          :model-value="binding"
+          :items="bindingItems(binding, index)"
+          :span="12"
+          :gutter="12"
+          label-position="top"
+          root-class="p-0!"
+          @update:model-value="(value) => updateBinding(index, value)"
+        />
+      </ArtSectionCard>
     </div>
-    <p v-if="!modelValue.length" class="text-sm text-g-700">暂无映射，按需添加。</p>
-    <ArtSectionCard
-      v-for="(binding, index) in modelValue"
-      :key="index"
-      :title="`映射 ${index + 1}`"
-      preserve-content-structure
-    >
-      <template #actions>
-        <ElButton link type="danger" @click="removeBinding(index)">移除</ElButton>
-      </template>
-      <ArtForm
-        :model-value="binding"
-        :items="bindingItems(binding, index)"
-        :span="12"
-        :gutter="12"
-        label-position="top"
-        root-class="p-0!"
-        @update:model-value="(value) => updateBinding(index, value)"
-      />
-    </ArtSectionCard>
-  </section>
+  </ArtSectionCard>
 </template>
 
 <script setup lang="ts">
+  import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
+  const sourceOptions = useDictionaryOptions(BFF_DICTIONARIES.interfaces.bindingSource)
+  const valueTypeOptions = useDictionaryOptions(BFF_DICTIONARIES.interfaces.valueType)
+  const booleanOptions = useDictionaryOptions(BFF_DICTIONARIES.common.boolean)
   import type { FormItem } from '@/components/core/forms/art-form/index.vue'
-  import ArtSectionTitle from '@/components/core/surfaces/art-section-title/index.vue'
   import ArtSectionCard from '@/components/core/surfaces/art-section-card/index.vue'
   import type { InterfaceBinding, InterfaceInputField } from '@bff/types/interface'
 
@@ -73,11 +82,10 @@
         span: 12,
         props: {
           'aria-label': `${label}来源`,
-          options: [
-            { label: '接口输入', value: 'input' },
-            { label: '前序步骤', value: 'step', disabled: !props.steps.length },
-            { label: '固定值', value: 'literal' }
-          ]
+          options: sourceOptions.map((item) => ({
+            ...item,
+            disabled: item.value === 'step' && !props.steps.length
+          }))
         }
       },
       {
@@ -132,11 +140,7 @@
         hidden: () => binding.source !== 'literal',
         props: {
           'aria-label': `${label}固定值类型`,
-          options: [
-            { label: '文本', value: 'string' },
-            { label: '数字', value: 'number' },
-            { label: '布尔值', value: 'boolean' }
-          ]
+          options: valueTypeOptions
         }
       },
       {
@@ -149,10 +153,7 @@
           binding.literalType === 'boolean'
             ? {
                 'aria-label': `${label}固定值`,
-                options: [
-                  { label: '是（true）', value: 'true' },
-                  { label: '否（false）', value: 'false' }
-                ]
+                options: booleanOptions
               }
             : {
                 maxlength: 1024,

@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks'
 import type {
-  InterfaceRecord,
+  InterfaceExecutionDefinition,
+  InterfaceErrorClass,
   InterfaceScalar,
   InterfaceStep,
   InterfaceTestResult,
@@ -20,6 +21,14 @@ export type InterfaceTargetLoader = (
   step: InterfaceStep,
   remainingMs: number
 ) => Promise<InterfaceStepTarget>
+export interface InterfaceRunOptions {
+  policy?: UpstreamNetworkPolicy
+  /** One authorized snapshot before any outbound request; each step still reloads its target. */
+  preflight?: (
+    steps: readonly InterfaceStep[],
+    remainingMs: number
+  ) => Promise<InterfaceStepTarget[]>
+}
 
 function networkMessage(code: string): string {
   switch (code) {
@@ -41,12 +50,55 @@ function networkMessage(code: string): string {
       return '上游调用未完成，请检查网络、证书或服务状态'
   }
 }
+export function classifyExecutionCode(
+  code: string,
+  statusCode: number | null = null
+): InterfaceErrorClass {
+  if (code === 'timeout') return 'timeout'
+  if (code === 'upstream_error') {
+    if (statusCode === 401 || statusCode === 403) return 'authorization'
+    if (statusCode === 429) return 'rate_limited'
+    if (statusCode !== null && statusCode >= 400 && statusCode < 500) return 'validation'
+    return 'upstream'
+  }
+  if (
+    [
+      'invalid_url',
+      'invalid_policy',
+      'invalid_timeout',
+      'target_not_allowed',
+      'target_blocked'
+    ].includes(code)
+  )
+    return 'validation'
+  if (code === 'response_too_large' || code === 'invalid_response' || code === 'redirect_blocked')
+    return 'upstream'
+  return 'unknown'
+}
+
+export function classifyExecutionError(error: unknown): InterfaceErrorClass {
+  if (error instanceof HttpError) {
+    if (
+      ['RESULT_UNKNOWN', 'UPSTREAM_CHANGED', 'DEPLOYMENT_CHANGED', 'GATEWAY_UNAVAILABLE'].includes(
+        error.code
+      )
+    )
+      return 'unknown'
+    if (error.code === 'RATE_LIMITED' || error.code === 'CONCURRENCY_LIMIT') return 'rate_limited'
+    if (error.code === 'FORBIDDEN' || error.code === 'ACCESS_NOT_GRANTED') return 'authorization'
+    if (error.status === 408 || error.status === 504) return 'timeout'
+    if (error.status === 401 || error.status === 403) return 'authorization'
+    if (error.status === 429) return 'rate_limited'
+    if (error.status >= 400 && error.status < 500) return 'validation'
+  }
+  return 'unknown'
+}
 /** Sequential, bounded business composition; no scripts, retries, headers or raw bodies are exposed. */
 export async function runInterface(
-  definition: InterfaceRecord,
+  definition: InterfaceExecutionDefinition,
   input: Record<string, InterfaceScalar>,
   loadTarget: InterfaceTargetLoader,
-  policy: UpstreamNetworkPolicy = upstreamPolicy
+  options: InterfaceRunOptions = {}
 ): Promise<InterfaceTestResult> {
   const started = performance.now()
   const deadline = started + 30_000
@@ -66,6 +118,7 @@ export async function runInterface(
     output: {},
     steps: trace,
     durationMs: 0,
+    errorClass: null,
     message: ''
   }
   function rememberCredential(target: InterfaceStepTarget): void {
@@ -83,8 +136,15 @@ export async function runInterface(
     const issues = validateInterfaceDefinition(definition)
     if (issues.length) throw new HttpError(400, '接口定义尚未通过校验，请先修复编排')
     // Resolve every target before the first external side effect. Each step rechecks authority below.
-    for (const step of definition.definition.steps)
-      rememberCredential(await loadTarget(step, remaining()))
+    if (options.preflight) {
+      const targets = await options.preflight(definition.definition.steps, remaining())
+      if (targets.length !== definition.definition.steps.length)
+        throw new HttpError(503, '上游就绪检查未返回完整目标，请稍后重试')
+      targets.forEach(rememberCredential)
+    } else {
+      for (const step of definition.definition.steps)
+        rememberCredential(await loadTarget(step, remaining()))
+    }
     for (const step of definition.definition.steps) {
       if (trace.some((item) => item.status === 'failed')) {
         trace.push({
@@ -93,6 +153,8 @@ export async function runInterface(
           status: 'skipped',
           statusCode: null,
           durationMs: 0,
+          code: null,
+          errorClass: null,
           message: '前序步骤失败，未发送请求'
         })
         continue
@@ -120,7 +182,7 @@ export async function runInterface(
             credential: target.credential
           },
           Math.min(target.timeoutMs, remaining()),
-          policy
+          options.policy ?? upstreamPolicy
         )
         trace.push({
           key: step.key,
@@ -128,6 +190,10 @@ export async function runInterface(
           status: response.ok ? 'passed' : 'failed',
           statusCode: response.statusCode,
           durationMs: response.durationMs,
+          code: response.ok ? null : response.code,
+          errorClass: response.ok
+            ? null
+            : classifyExecutionCode(response.code, response.statusCode),
           message: response.ok ? '调用成功' : networkMessage(response.code)
         })
         if (response.ok) responses[step.key] = response.body
@@ -138,13 +204,16 @@ export async function runInterface(
           status: 'failed',
           statusCode: null,
           durationMs: Math.round(performance.now() - stepStarted),
+          code: error instanceof HttpError ? error.code : 'STEP_FAILED',
+          errorClass: classifyExecutionError(error),
           message: error instanceof HttpError ? error.message : '步骤执行失败，请检查输入与服务配置'
         })
       }
     }
-    if (trace.some((item) => item.status === 'failed'))
+    if (trace.some((item) => item.status === 'failed')) {
+      result.errorClass = trace.find((item) => item.status === 'failed')?.errorClass ?? 'unknown'
       result.message = '试运行未通过，请查看步骤摘要；未执行后续步骤'
-    else {
+    } else {
       const output = mappedFields(definition.definition.outputs, input, responses)
       if (Object.keys(output).length !== definition.definition.outputs.length)
         throw new HttpError(400, '输出映射未找到对应字段，请核对上游结果路径')
@@ -155,6 +224,7 @@ export async function runInterface(
       result.message = '试运行通过；仅返回已声明的映射字段'
     }
   } catch (error) {
+    result.errorClass = classifyExecutionError(error)
     result.message = error instanceof HttpError ? error.message : '试运行未完成，请稍后重试'
     for (const step of definition.definition.steps.slice(trace.length))
       trace.push({
@@ -163,6 +233,8 @@ export async function runInterface(
         status: 'skipped',
         statusCode: null,
         durationMs: 0,
+        code: null,
+        errorClass: null,
         message: '就绪检查未通过，未发送请求'
       })
   }
