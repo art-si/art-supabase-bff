@@ -52,6 +52,7 @@ import {
 } from './releases'
 import { handleGateway } from './gateway'
 import { brandingDto, readBranding, writeBranding } from './branding'
+import { generateBrandWordmark } from './wordmark'
 import {
   acknowledgeAlert,
   alertDetail,
@@ -161,37 +162,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
         csrfToken: session.row.csrf_token,
         permissions,
         branding: brandingDto(context.branding),
-        menu: new TreeUtils({ parentKey: 'parentId' }).listToTree(
-          nodes.map((node) =>
-            node.component === '/shared/system/role'
-              ? { ...node, props: { organizationScope: false } }
-              : node.component === '/shared/system/website-config'
-                ? {
-                    ...node,
-                    props: {
-                      profile: 'branding',
-                      canEdit: permissions.includes('BffBrand:Edit'),
-                      resourceTenantId: session.member.tenant_id,
-                      resourceCanView: permissions.includes('BffResource:View'),
-                      resourceCanUpload: permissions.includes('BffResource:Add'),
-                      resourceCanEdit: permissions.includes('BffResource:Edit'),
-                      resourceCanDelete: permissions.includes('BffResource:Delete')
-                    }
-                  }
-                : node.component === '/shared/data-center/attachment'
-                  ? {
-                      ...node,
-                      props: {
-                        title: '资源管理',
-                        canView: permissions.includes('BffResource:View'),
-                        canUpload: permissions.includes('BffResource:Add'),
-                        canRename: permissions.includes('BffResource:Edit'),
-                        canDelete: permissions.includes('BffResource:Delete')
-                      }
-                    }
-                  : node
-          )
-        )
+        menu: new TreeUtils({ parentKey: 'parentId' }).listToTree(nodes)
       })
       return
     }
@@ -228,6 +199,15 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     }
     if (url.pathname === '/api/control/menus' && req.method === 'GET') {
       json(res, await readMenus(session, url.searchParams.get('catalog') === '1'))
+      return
+    }
+    if (url.pathname === '/api/control/organizations' && req.method === 'GET') {
+      // BFF roles currently belong to the workspace; no organization records are provisioned.
+      json(res, [])
+      return
+    }
+    if (url.pathname === '/api/control/branding/wordmark' && req.method === 'POST') {
+      json(res, await generateBrandWordmark(req, session))
       return
     }
     if (url.pathname === '/api/control/branding') {

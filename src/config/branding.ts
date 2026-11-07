@@ -3,13 +3,11 @@ import { BFF_BRANDING_DEFAULTS, type BffBrandingRecord } from '@bff/types/brandi
 
 /** BFF product values; rendering and configuration behavior belong to the pro package. */
 export function createBffWebsiteDefaults(): Api.SystemManage.WebsiteConfigItem {
+  const defaults = createWebsiteConfigDefaults()
   return {
-    ...createWebsiteConfigDefaults(),
+    ...defaults,
     ...BFF_BRANDING_DEFAULTS,
-    seoTitle: BFF_BRANDING_DEFAULTS.siteName,
-    seoKeywords: 'BFF,应用管理,接口编排',
-    seoDescription: BFF_BRANDING_DEFAULTS.siteDescription,
-    copyrightText: `© ${BFF_BRANDING_DEFAULTS.siteName}`
+    authChannels: defaults.authChannels
   }
 }
 
@@ -19,10 +17,9 @@ export function websiteConfigFromBranding(
   return {
     ...createBffWebsiteDefaults(),
     ...record.config,
+    authChannels: record.config.authChannels.map((channel) => ({ ...channel })),
     id: record.id,
     version: record.version,
-    seoTitle: record.config.siteName,
-    seoDescription: record.config.siteDescription,
     createTime: record.createdAt ?? undefined,
     updateTime: record.updatedAt ?? undefined,
     updateBy: record.updatedByName

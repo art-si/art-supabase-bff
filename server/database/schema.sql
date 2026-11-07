@@ -457,34 +457,114 @@ create index if not exists bff_alert_instances_scope_idx
   on public.bff_alert_instances(tenant_id,application_id,environment,opened_at desc,id);
 create or replace function public.bff_valid_branding(p_config jsonb)
 returns boolean language plpgsql immutable security invoker set search_path='' as $$
-declare item text; address text;
+declare item text; address text; channel jsonb; channel_key text; provider text;
+  seen_keys text[]:=array[]::text[]; seen_providers text[]:=array[]::text[];
 begin
-  if jsonb_typeof(p_config) is distinct from 'object' or not (p_config ?& array[
-    'siteName','siteShortName','siteDescription','logoUrl','faviconUrl',
-    'watermarkEnabled','watermarkContentType','watermarkCustomText']) or
+  if jsonb_typeof(p_config) is distinct from 'object' then return false; end if;
+  if not (p_config ?& array[
+    'siteName','siteShortName','siteDescription','logoUrl','faviconUrl','wordmarkImageEnabled',
+    'wordmarkLightUrl','wordmarkDarkUrl','watermarkEnabled','watermarkContentType',
+    'watermarkCustomText','loginTitle','loginSubtitle','loginDescription','defaultLanguage',
+    'captchaEnabled','captchaType','turnstileSiteKey','turnstileSize','turnstileTheme',
+    'captchaMaxAttempts','captchaLockMinutes','registerEnabled','authChannels',
+    'maintenanceEnabled','maintenanceMessage','seoTitle','seoKeywords','seoDescription',
+    'contactEmail','contactPhone','contactAddress','copyrightText','icpRecord','policeRecord','enabled']) or
     exists(select 1 from jsonb_object_keys(p_config) as k(name) where k.name not in (
-      'siteName','siteShortName','siteDescription','logoUrl','faviconUrl',
-      'watermarkEnabled','watermarkContentType','watermarkCustomText'))
+      'siteName','siteShortName','siteDescription','logoUrl','faviconUrl','wordmarkImageEnabled',
+      'wordmarkLightUrl','wordmarkDarkUrl','watermarkEnabled','watermarkContentType',
+      'watermarkCustomText','loginTitle','loginSubtitle','loginDescription','defaultLanguage',
+      'captchaEnabled','captchaType','turnstileSiteKey','turnstileSize','turnstileTheme',
+      'captchaMaxAttempts','captchaLockMinutes','registerEnabled','authChannels',
+      'maintenanceEnabled','maintenanceMessage','seoTitle','seoKeywords','seoDescription',
+      'contactEmail','contactPhone','contactAddress','copyrightText','icpRecord','policeRecord','enabled'))
   then return false; end if;
   foreach item in array array['siteName','siteShortName','siteDescription','logoUrl','faviconUrl',
-    'watermarkContentType','watermarkCustomText'] loop
+    'wordmarkLightUrl','wordmarkDarkUrl','watermarkContentType','watermarkCustomText','loginTitle',
+    'loginSubtitle','loginDescription','defaultLanguage','captchaType','turnstileSiteKey',
+    'turnstileSize','turnstileTheme','maintenanceMessage','seoTitle','seoKeywords',
+    'seoDescription','contactEmail','contactPhone','contactAddress','copyrightText',
+    'icpRecord','policeRecord'] loop
     if jsonb_typeof(p_config->item) is distinct from 'string' then return false; end if;
+  end loop;
+  foreach item in array array['wordmarkImageEnabled','watermarkEnabled','captchaEnabled',
+    'registerEnabled','maintenanceEnabled','enabled'] loop
+    if jsonb_typeof(p_config->item) is distinct from 'boolean' then return false; end if;
+  end loop;
+  foreach item in array array['captchaMaxAttempts','captchaLockMinutes'] loop
+    if jsonb_typeof(p_config->item) is distinct from 'number' or (p_config->>item) !~ '^[0-9]+$'
+    then return false; end if;
   end loop;
   if length(trim(p_config->>'siteName')) not between 1 and 60 or
     length(p_config->>'siteShortName')>40 or length(p_config->>'siteDescription')>255 or
-    jsonb_typeof(p_config->'watermarkEnabled') is distinct from 'boolean' or
+    length(p_config->>'watermarkCustomText')>80 or length(trim(p_config->>'loginTitle')) not between 1 and 80 or
+    length(p_config->>'loginSubtitle')>255 or length(p_config->>'loginDescription')>255 or
+    length(p_config->>'turnstileSiteKey')>120 or length(p_config->>'maintenanceMessage')>160 or
+    length(p_config->>'seoTitle')>80 or length(p_config->>'seoKeywords')>160 or
+    length(p_config->>'seoDescription')>500 or length(p_config->>'contactEmail')>254 or
+    length(p_config->>'contactPhone')>64 or length(p_config->>'contactAddress')>500 or
+    length(p_config->>'copyrightText')>255 or length(p_config->>'icpRecord')>160 or
+    length(p_config->>'policeRecord')>160 or
     p_config->>'watermarkContentType' not in ('username','username_time','site_name','custom') or
-    length(p_config->>'watermarkCustomText')>80
+    p_config->>'defaultLanguage' not in ('zh','en') or p_config->>'captchaType'<>'turnstile' or
+    p_config->>'turnstileSize' not in ('normal','compact','flexible','hidden') or
+    p_config->>'turnstileTheme' not in ('light','dark','auto') or
+    (p_config->>'captchaMaxAttempts')::numeric not between 0 and 20 or
+    (p_config->>'captchaLockMinutes')::numeric not between 0 and 1440
   then return false; end if;
   if (p_config->>'watermarkEnabled')::boolean and p_config->>'watermarkContentType'='custom' and
     length(trim(p_config->>'watermarkCustomText'))=0 then return false; end if;
-  foreach item in array array['logoUrl','faviconUrl'] loop
+  if (p_config->>'captchaEnabled')::boolean and length(trim(p_config->>'turnstileSiteKey'))=0
+  then return false; end if;
+  if (p_config->>'maintenanceEnabled')::boolean and length(trim(p_config->>'maintenanceMessage'))=0
+  then return false; end if;
+  if (p_config->>'wordmarkImageEnabled')::boolean and
+    (length(trim(p_config->>'wordmarkLightUrl'))=0 or length(trim(p_config->>'wordmarkDarkUrl'))=0)
+  then return false; end if;
+  foreach item in array array['logoUrl','faviconUrl','wordmarkLightUrl','wordmarkDarkUrl'] loop
     address:=p_config->>item;
     if length(address)>2000 or address ~ '[[:space:]\\?#]' or left(address,2)='//' or
       (address<>'' and address !~ '^https://[^/@[:space:]?#]+(/[^[:space:]?#]*)?$' and
         address !~ '^/[^/[:space:]?#][^[:space:]?#]*$') or
       address ~ '(^|/)\.{1,2}(/|$)'
     then return false; end if;
+  end loop;
+  if jsonb_typeof(p_config->'authChannels') is distinct from 'array' then return false; end if;
+  if jsonb_array_length(p_config->'authChannels')>20 then return false; end if;
+  for channel in select value from jsonb_array_elements(p_config->'authChannels') loop
+    if jsonb_typeof(channel) is distinct from 'object' then return false; end if;
+    if not (channel ?& array[
+      'key','label','provider','icon','enabled','allowLinking']) or
+      exists(select 1 from jsonb_object_keys(channel) as k(name) where k.name not in (
+        'key','label','provider','icon','description','scopes','queryParamName','queryParamValue',
+        'enabled','allowLinking')) or
+      jsonb_typeof(channel->'key') is distinct from 'string' or
+      jsonb_typeof(channel->'label') is distinct from 'string' or
+      jsonb_typeof(channel->'provider') is distinct from 'string' or
+      jsonb_typeof(channel->'icon') is distinct from 'string' or
+      jsonb_typeof(channel->'enabled') is distinct from 'boolean' or
+      jsonb_typeof(channel->'allowLinking') is distinct from 'boolean'
+    then return false; end if;
+    foreach item in array array['description','scopes','queryParamName','queryParamValue'] loop
+      if channel ? item and jsonb_typeof(channel->item) not in ('string','null') then return false; end if;
+    end loop;
+    channel_key:=channel->>'key'; provider:=channel->>'provider';
+    if channel_key !~ '^[a-z][a-z0-9_-]{1,39}$' or channel_key=any(seen_keys) or
+      length(trim(channel->>'label')) not between 1 and 40 or
+      length(channel->>'icon')>80 or channel->>'icon' !~ '^[a-z0-9-]+:[a-z0-9-]+$' or
+      (provider not in ('apple','azure','bitbucket','discord','facebook','figma','github','gitlab',
+        'google','kakao','keycloak','linkedin','linkedin_oidc','notion','slack','slack_oidc',
+        'spotify','twitch','twitter','workos','x','zoom') and
+        provider !~ '^custom:[a-z0-9][a-z0-9:-]{0,42}[a-z0-9]$') or
+      provider=any(seen_providers) or length(coalesce(channel->>'description',''))>100 or
+      length(coalesce(channel->>'scopes',''))>200 or
+      length(coalesce(channel->>'queryParamName',''))>64 or
+      length(coalesce(channel->>'queryParamValue',''))>160 or
+      coalesce(channel->>'queryParamName','') ~* '(^|[._-])(secret|password|token|api[_-]?key)([._-]|$)' or
+      (coalesce(channel->>'queryParamName','')<>'' and
+        (channel->>'queryParamName' !~ '^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$' or
+          coalesce(channel->>'queryParamValue','')=''))
+    then return false; end if;
+    seen_keys:=array_append(seen_keys,channel_key); seen_providers:=array_append(seen_providers,provider);
   end loop;
   return true;
 end $$;
@@ -1542,6 +1622,39 @@ end $$;
 revoke all on function public.bff_control_references(uuid,text,uuid[]) from public,anon,authenticated;
 grant execute on function public.bff_control_references(uuid,text,uuid[]) to service_role;
 
+create or replace function public.bff_migrate_branding_permissions(p_actor uuid)
+returns void language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; action text; old_button uuid; new_button uuid;
+  old_name text; new_name text;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled and role='admin';
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||actor.tenant_id::text,0));
+  foreach action in array array['View','Edit'] loop
+    old_name:='BffBrand:'||action;
+    new_name:='System:WebsiteConfig:'||case when action='Edit' then 'Publish' else 'View' end;
+    select id into old_button from public.bff_menus where tenant_id=actor.tenant_id and name=old_name;
+    select id into new_button from public.bff_menus where tenant_id=actor.tenant_id and name=new_name;
+    if old_button is not null and new_button is null then
+      update public.bff_menus set name=new_name,version=version+1,update_by=actor.id,update_time=now()
+        where id=old_button and tenant_id=actor.tenant_id;
+    elsif old_button is not null and new_button is not null then
+      insert into public.bff_role_menus(tenant_id,role_id,menu_id,create_by)
+        select actor.tenant_id,rm.role_id,new_button,rm.create_by from public.bff_role_menus rm
+        where rm.tenant_id=actor.tenant_id and rm.menu_id=old_button on conflict do nothing;
+      update public.bff_menus current_button set
+        meta=pg_catalog.jsonb_set(current_button.meta,'{isEnable}',
+          pg_catalog.to_jsonb(coalesce(current_button.meta->'isEnable','true'::jsonb)='true'::jsonb or
+            coalesce(legacy.meta->'isEnable','true'::jsonb)='true'::jsonb)),
+        version=current_button.version+1,update_by=actor.id,update_time=now()
+        from public.bff_menus legacy where current_button.id=new_button and legacy.id=old_button;
+      delete from public.bff_role_menus where tenant_id=actor.tenant_id and menu_id=old_button;
+      delete from public.bff_menus where tenant_id=actor.tenant_id and id=old_button;
+    end if;
+  end loop;
+end $$;
+revoke all on function public.bff_migrate_branding_permissions(uuid) from public,anon,authenticated;
+grant execute on function public.bff_migrate_branding_permissions(uuid) to service_role;
 -- Seed installed shared capabilities only, without changing existing records.
 -- An active, explicitly provisioned BFF administrator is required in each tenant.
 do $$
@@ -1560,6 +1673,7 @@ begin
       insert into public.bff_resource_revisions(tenant_id,resource) values(actor.tenant_id,'menus') on conflict do nothing;
       perform public.bff_control_advance(actor.id,'menus','menu.bootstrap',null,jsonb_build_object('normalized',normalized));
     end if;
+    perform public.bff_migrate_branding_permissions(actor.id);
     for entry in select * from (values
       ('BffApplications',null::text,'/applications','/bff/applications/index','应用管理','ri:apps-2-line','menu',1),
       ('BffSystem',null,'/system','/index/index','系统管理','ri:settings-3-line','folder',90),
@@ -1589,14 +1703,14 @@ begin
     end loop;
     for entry in select * from (values('BffApplications','BffApplication'),('Menu','System:Menu'),('Role','System:Role'),('User','System:Member'),
       ('BffUpstreams','BffUpstream'),('BffInterfaces','BffInterface'),
-      ('BffReleases','BffRelease'),('BffBranding','BffBrand'),('BffResources','BffResource'),('BffCalls','BffCall'),
+      ('BffReleases','BffRelease'),('BffBranding','System:WebsiteConfig'),('BffResources','BffResource'),('BffCalls','BffCall'),
       ('BffAlertRules','BffAlert'),('BffAlertInstances','BffAlert'),('Dict','DataCenter:Dict')) as pages(name,mark) loop
       select id into page from public.bff_menus where tenant_id=actor.tenant_id and name=entry.name;
       foreach action in array case when entry.mark='BffApplication' then array['View','Add','Edit','Grant']
         when entry.mark='BffUpstream' then array['View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete']
         when entry.mark='BffInterface' then array['View','Add','Edit','Validate','Test','TestWrite','Delete']
         when entry.mark='BffRelease' then array['View','Publish','Rollback','ChangeStatus']
-        when entry.mark='BffBrand' then array['View','Edit']
+        when entry.mark='System:WebsiteConfig' then array['View','Publish']
         when entry.mark='BffResource' then array['View','Add','Edit','Delete']
         when entry.name='BffCalls' then array['View']
         when entry.name='BffAlertRules' then array['View','Add','Edit','ChangeStatus','Archive','Evaluate']
@@ -1604,8 +1718,8 @@ begin
         when entry.mark='System:Role' then array['View','Add','Edit','Delete','AssignPermission','AssignUser']
         when entry.mark='System:Member' then array['View','Add','Edit'] else array['View','Add','Edit','Delete'] end loop
         insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
-          values(actor.tenant_id,page,case when entry.name='BffAlertRules' and action='View' then 'BffAlertRule:View' else entry.mark||':'||action end,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then '新增' when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Archive' then '归档' when 'Acknowledge' then '确认告警' when 'Evaluate' then '立即评估' when 'Publish' then '发布版本' when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
-            'isEnable',entry.mark not in ('BffInterface','BffRelease','BffBrand','BffCall','BffAlert','BffResource')),true,actor.id,actor.id)
+          values(actor.tenant_id,page,case when entry.name='BffAlertRules' and action='View' then 'BffAlertRule:View' else entry.mark||':'||action end,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then case when entry.mark='System:Member' then '开通成员' else '新增' end when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Archive' then '归档' when 'Acknowledge' then '确认告警' when 'Evaluate' then '立即评估' when 'Publish' then case when entry.mark='System:WebsiteConfig' then '发布配置' else '发布版本' end when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
+            'isEnable',entry.mark not in ('BffInterface','BffRelease','System:WebsiteConfig','BffCall','BffAlert','BffResource')),true,actor.id,actor.id)
           on conflict (tenant_id,name) do nothing;
       end loop;
       if entry.mark='BffInterface' then
@@ -1679,11 +1793,12 @@ declare actor public.bff_members; current_record public.bff_platform_settings; r
 begin
   if p_version is null or p_version<0 or not public.bff_valid_branding(p_config)
   then raise exception 'BFF_INVALID_BRANDING'; end if;
-  revision:=public.bff_control_lock(p_actor,'BffBrand:Edit','branding');
+  revision:=public.bff_control_lock(p_actor,'System:WebsiteConfig:Publish','branding');
   select * into actor from public.bff_members where id=p_actor and enabled;
   select * into current_record from public.bff_platform_settings where tenant_id=actor.tenant_id for update;
   if coalesce(current_record.version,0)<>p_version then raise exception 'BFF_CONFLICT'; end if;
-  foreach branding_url in array array[p_config->>'logoUrl',p_config->>'faviconUrl'] loop
+  foreach branding_url in array array[p_config->>'logoUrl',p_config->>'faviconUrl',
+    p_config->>'wordmarkLightUrl',p_config->>'wordmarkDarkUrl'] loop
     if left(branding_url,15)='/api/resources/' then
       if branding_url !~ '^/api/resources/[1-9][0-9]*/content$' then raise exception 'BFF_INVALID_BRANDING_RESOURCE'; end if;
       begin resource_id:=pg_catalog.split_part(branding_url,'/',4)::bigint;
@@ -1830,11 +1945,14 @@ begin
   select coalesce(jsonb_agg(jsonb_build_object('resourceId',r.id,
     'sourceTable','bff_platform_settings','dependencyCode',field.name,
     'recordId',s.tenant_id,'targetId',r.id,'recordNo',s.config->>'siteName',
-    'recordSummary',case field.name when 'logoUrl' then '系统 Logo 正在使用' else '浏览器图标正在使用' end,
+    'recordSummary',case field.name when 'logoUrl' then '系统 Logo 正在使用'
+      when 'faviconUrl' then '浏览器图标正在使用'
+      else '品牌字图正在使用' end,
     'createdAt',s.updated_at,'cleanupAllowed',false) order by r.id,field.name),'[]'::jsonb)
     into result from public.bff_resources r
     join public.bff_platform_settings s on s.tenant_id=r.tenant_id
-    cross join lateral (values('logoUrl'::text),('faviconUrl'::text)) as field(name)
+    cross join lateral (values('logoUrl'::text),('faviconUrl'::text),
+      ('wordmarkLightUrl'::text),('wordmarkDarkUrl'::text)) as field(name)
     where r.tenant_id=actor.tenant_id and r.id=any(p_ids) and
       s.config->>field.name='/api/resources/'||r.id::text||'/content';
   return result;
@@ -1872,7 +1990,9 @@ begin
   if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
   select exists(select 1 from public.bff_platform_settings s where s.tenant_id=actor.tenant_id and
     (s.config->>'logoUrl'='/api/resources/'||p_id::text||'/content' or
-      s.config->>'faviconUrl'='/api/resources/'||p_id::text||'/content')) into is_brand;
+      s.config->>'faviconUrl'='/api/resources/'||p_id::text||'/content' or
+      s.config->>'wordmarkLightUrl'='/api/resources/'||p_id::text||'/content' or
+      s.config->>'wordmarkDarkUrl'='/api/resources/'||p_id::text||'/content')) into is_brand;
   if not public.bff_actor_can(p_actor,'BffResource:View') and not
     (is_brand and saved.mime_type in ('image/png','image/jpeg','image/webp','image/gif',
       'image/x-icon','image/vnd.microsoft.icon'))
@@ -1899,7 +2019,9 @@ begin
       'image/x-icon','image/vnd.microsoft.icon') and exists(select 1 from public.bff_platform_settings s
         where s.tenant_id=actor.tenant_id and
           (s.config->>'logoUrl'='/api/resources/'||r.id::text||'/content' or
-           s.config->>'faviconUrl'='/api/resources/'||r.id::text||'/content')));
+           s.config->>'faviconUrl'='/api/resources/'||r.id::text||'/content' or
+           s.config->>'wordmarkLightUrl'='/api/resources/'||r.id::text||'/content' or
+           s.config->>'wordmarkDarkUrl'='/api/resources/'||r.id::text||'/content')));
   return result;
 end $$;
 create or replace function public.bff_resource_cleanup_claim(p_limit integer default 20)

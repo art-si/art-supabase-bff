@@ -1,7 +1,19 @@
 import TreeUtils from '@/utils/tree'
 import type { QueryResult } from '@/types/api/response'
-import { call } from '@bff/api/bff'
+import { bffSession, call } from '@bff/api/bff'
+import type { ResourceCapabilities } from 'art-supabase-pro/src/api/data-center'
 export * from 'art-supabase-pro/src/api/data-center'
+
+/** Standard resource capabilities are scoped to the authenticated BFF session. */
+export async function fetchResourceCapabilities(): Promise<ResourceCapabilities> {
+  const permissions = bffSession.value?.permissions ?? []
+  return {
+    canView: permissions.includes('BffResource:View'),
+    canUpload: permissions.includes('BffResource:Add'),
+    canRename: permissions.includes('BffResource:Edit'),
+    canDelete: permissions.includes('BffResource:Delete')
+  }
+}
 
 type Resource = Api.DataCenter.Resources.ResourceListItem & { version: number }
 

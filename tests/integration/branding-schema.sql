@@ -1,9 +1,10 @@
--- Tenant branding uses the shared pro UI but owns only BFF configuration data.
+-- Full shared pro website configuration is tenant scoped to BFF business data.
 do $branding_test$
 declare tenant_a uuid:=gen_random_uuid(); tenant_b uuid:=gen_random_uuid();
   admin_a uuid:=gen_random_uuid(); admin_b uuid:=gen_random_uuid(); viewer uuid:=gen_random_uuid();
   delegated_role uuid:=gen_random_uuid(); config_a jsonb; config_b jsonb; result jsonb;
   config_page uuid:=gen_random_uuid(); edit_button uuid:=gen_random_uuid();
+  old_view uuid:=gen_random_uuid(); new_view uuid:=gen_random_uuid();
 begin
   insert into public.bff_members(id,issuer,subject,tenant_id,role) values
     (admin_a,'urn:bff-branding-fixture',admin_a::text,tenant_a,'admin'),
@@ -11,7 +12,19 @@ begin
     (viewer,'urn:bff-branding-fixture',viewer::text,tenant_a,'viewer');
   config_a:='{"siteName":"BFF平台","siteShortName":"BFF","siteDescription":"示例配置一",
     "logoUrl":"https://assets.example.test/mark.png","faviconUrl":"/favicon.svg",
-    "watermarkEnabled":true,"watermarkContentType":"username","watermarkCustomText":""}'::jsonb;
+    "wordmarkImageEnabled":false,"wordmarkLightUrl":"","wordmarkDarkUrl":"",
+    "watermarkEnabled":true,"watermarkContentType":"username","watermarkCustomText":"",
+    "loginTitle":"欢迎使用 BFF 平台","loginSubtitle":"统一管理应用","loginDescription":"企业应用平台",
+    "defaultLanguage":"zh","captchaEnabled":true,"captchaType":"turnstile",
+    "turnstileSiteKey":"0x4AAAAAADqOIVodNJNAZL57","turnstileSize":"normal","turnstileTheme":"auto",
+    "captchaMaxAttempts":0,"captchaLockMinutes":10,"registerEnabled":true,
+    "authChannels":[{"key":"github","label":"GitHub","provider":"github","icon":"ri:github-fill",
+      "description":null,"scopes":null,"queryParamName":null,"queryParamValue":null,
+      "enabled":false,"allowLinking":true}],
+    "maintenanceEnabled":false,"maintenanceMessage":"维护中","seoTitle":"BFF平台",
+    "seoKeywords":"BFF,应用管理","seoDescription":"企业应用平台",
+    "contactEmail":"","contactPhone":"","contactAddress":"","copyrightText":"© BFF平台",
+    "icpRecord":"","policeRecord":"","enabled":true}'::jsonb;
   config_b:=config_a||'{"siteName":"BFF运维中心","siteDescription":"示例配置二",
     "watermarkContentType":"custom","watermarkCustomText":"内部使用"}'::jsonb;
   result:=public.bff_read_branding(viewer);
@@ -31,6 +44,10 @@ begin
     raise exception 'Stale branding snapshot overwrote newer config';
   exception when raise_exception then if sqlerrm<>'BFF_CONFLICT' then raise; end if; end;
   if public.bff_valid_branding(config_a||'{"serviceKey":"forged"}'::jsonb) or
+    public.bff_valid_branding(config_a||'{"registerEnabled":"false"}'::jsonb) or
+    public.bff_valid_branding(config_a||'{"captchaMaxAttempts":21}'::jsonb) or
+    public.bff_valid_branding(config_a||'{"authChannels":[{"key":"github","label":"GitHub","provider":"github","icon":"ri:github-fill","enabled":true,"allowLinking":true,"clientSecret":"forged"}]}'::jsonb) or
+    public.bff_valid_branding(config_a||'{"authChannels":[{"key":"github","label":"GitHub","provider":"github","icon":"ri:github-fill","enabled":true,"allowLinking":true,"queryParamName":"client_secret","queryParamValue":"forged"}]}'::jsonb) or
     public.bff_valid_branding(config_a||'{"logoUrl":"javascript:alert(1)"}'::jsonb) or
     public.bff_valid_branding(config_a||'{"logoUrl":"https://user:pass@example.test/logo.png"}'::jsonb) or
     public.bff_valid_branding(config_a||'{"logoUrl":"//example.test/logo.png"}'::jsonb) or
@@ -40,16 +57,30 @@ begin
     (config_page,tenant_a,'BrandFixture','menu','/system/website-config','/shared/system/website-config',
       '{"title":"Branding"}'::jsonb,admin_a,admin_a);
   insert into public.bff_menus(id,tenant_id,parent_id,name,type,meta,create_by,update_by) values
-    (edit_button,tenant_a,config_page,'BffBrand:Edit','button','{"title":"Edit"}'::jsonb,admin_a,admin_a);
+    (edit_button,tenant_a,config_page,'BffBrand:Edit','button','{"title":"Edit"}'::jsonb,admin_a,admin_a),
+    (old_view,tenant_a,config_page,'BffBrand:View','button','{"title":"Old View"}'::jsonb,admin_a,admin_a),
+    (new_view,tenant_a,config_page,'System:WebsiteConfig:View','button','{"title":"View","isEnable":false}'::jsonb,admin_a,admin_a);
   insert into public.bff_roles(id,tenant_id,role_code,role_name,create_by,update_by)
     values(delegated_role,tenant_a,'BRANDING_FIXTURE','Brand maintainer',admin_a,admin_a);
   insert into public.bff_role_menus(tenant_id,role_id,menu_id,create_by)
     select tenant_a,delegated_role,id,admin_a from public.bff_menus
-    where tenant_id=tenant_a and name='BffBrand:Edit';
+    where tenant_id=tenant_a and name in ('BffBrand:Edit','BffBrand:View');
   insert into public.bff_member_roles(tenant_id,member_id,role_id,create_by)
     values(tenant_a,viewer,delegated_role,admin_a);
+  perform public.bff_migrate_branding_permissions(admin_a);
+  if not exists(select 1 from public.bff_menus where tenant_id=tenant_a and id=edit_button and
+      name='System:WebsiteConfig:Publish') or
+    exists(select 1 from public.bff_menus where tenant_id=tenant_a and name like 'BffBrand:%') or
+    not exists(select 1 from public.bff_role_menus where tenant_id=tenant_a and role_id=delegated_role and menu_id=new_view) or
+    not public.bff_actor_can(viewer,'System:WebsiteConfig:Publish') or
+    not public.bff_actor_can(viewer,'System:WebsiteConfig:View')
+  then raise exception 'Website permission migration lost IDs or role grants'; end if;
+  perform public.bff_migrate_branding_permissions(admin_a);
+  if (select count(*) from public.bff_menus where tenant_id=tenant_a and name like 'System:WebsiteConfig:%')<>2
+  then raise exception 'Website permission migration was not idempotent'; end if;
   result:=public.bff_write_branding(viewer,1,config_b);
-  if result->>'version'<>'2' or result->'config'->>'siteName'<>'BFF运维中心'
+  if result->>'version'<>'2' or result->'config'->>'siteName'<>'BFF运维中心' or
+    result->'config'->>'loginTitle'<>'欢迎使用 BFF 平台'
   then raise exception 'Delegated branding write failed'; end if;
   result:=public.bff_session_context(viewer);
   if result->'branding'->>'id'<>tenant_a::text or result->'branding'->'config'->>'siteName'<>'BFF运维中心' or
