@@ -1,10 +1,6 @@
 import { shallowRef } from 'vue'
-import type {
-  ApplicationInput,
-  ApplicationList,
-  ApplicationMember,
-  BffSession
-} from '@bff/types/bff'
+import { isObjectRecord } from 'art-supabase-pro/src/utils/record'
+import type { ApplicationInput, ApplicationList, ApplicationMember, BffSession } from '../types/bff'
 
 export const bffSession = shallowRef<BffSession | null>(null)
 export class BffApiError extends Error {
@@ -16,20 +12,22 @@ export class BffApiError extends Error {
   }
 }
 export async function call<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers)
+  if (!(options.body instanceof FormData) && !headers.has('Content-Type'))
+    headers.set('Content-Type', 'application/json')
+  if (bffSession.value) headers.set('X-CSRF-Token', bffSession.value.csrfToken)
   const response = await fetch(url, {
     ...options,
     credentials: 'same-origin',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(bffSession.value ? { 'X-CSRF-Token': bffSession.value.csrfToken } : {}),
-      ...options.headers
-    }
+    headers
   })
-  const value = await response.json()
+  const value: unknown = await response.json()
   if (!response.ok) {
     if (response.status === 401) bffSession.value = null
     throw new BffApiError(
-      typeof value.message === 'string' ? value.message : '操作失败，请稍后重试',
+      isObjectRecord(value) && typeof value.message === 'string'
+        ? value.message
+        : '操作失败，请稍后重试',
       response.status
     )
   }

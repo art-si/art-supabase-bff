@@ -417,6 +417,85 @@ create table if not exists public.bff_platform_settings (
 );
 create index if not exists bff_platform_settings_creator_idx on public.bff_platform_settings(created_by);
 create index if not exists bff_platform_settings_updater_idx on public.bff_platform_settings(updated_by);
+insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types)
+  values('bff-assets','bff-assets',false,10485760,array[
+    'image/png','image/jpeg','image/webp','image/gif','image/x-icon','image/vnd.microsoft.icon',
+    'application/pdf','application/msword','application/vnd.ms-excel','application/vnd.ms-powerpoint',
+    'audio/mpeg','video/mp4','audio/ogg','audio/wav','video/webm','application/zip',
+    'text/plain','text/csv','application/json',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation'])
+  on conflict(id) do nothing;
+do $$ begin
+  if not exists(select 1 from storage.buckets where id='bff-assets' and name='bff-assets' and not public and
+    file_size_limit=10485760 and allowed_mime_types @> array[
+      'image/png','image/jpeg','image/webp','image/gif','image/x-icon','image/vnd.microsoft.icon',
+      'application/pdf','application/msword','application/vnd.ms-excel','application/vnd.ms-powerpoint',
+      'audio/mpeg','video/mp4','audio/ogg','audio/wav','video/webm','application/zip',
+      'text/plain','text/csv','application/json',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation'])
+  then raise exception 'BFF_RESOURCE_BUCKET_POLICY_MISMATCH'; end if;
+end $$;
+create table if not exists public.bff_resources (
+  id bigint generated always as identity primary key check (id between 1 and 9007199254740991),
+  tenant_id uuid not null,
+  storage_bucket text not null default 'bff-assets' check (storage_bucket='bff-assets'),
+  storage_path text not null,
+  object_name text not null,
+  origin_name text not null check (length(trim(origin_name)) between 1 and 255 and origin_name !~ '[[:cntrl:]/\\]'),
+  mime_type text not null check (length(mime_type) between 3 and 150 and
+    mime_type ~ '^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$'),
+  suffix text not null check (suffix ~ '^[a-z0-9]{1,10}$'),
+  size_byte bigint not null check (size_byte between 1 and 10485760),
+  hash text not null check (hash ~ '^[0-9a-f]{64}$'),
+  status text not null default 'pending' check (status in ('pending','ready','deleting','deleted')),
+  upload_token_hash text check (upload_token_hash ~ '^[0-9a-f]{64}$'),
+  cleanup_token_hash text check (cleanup_token_hash ~ '^[0-9a-f]{64}$'),
+  cleanup_lease_until timestamptz,
+  version integer not null default 1 check (version>0),
+  created_by uuid not null,
+  updated_by uuid not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz,
+  unique(storage_bucket,storage_path,object_name),
+  unique(id,tenant_id),
+  check (storage_path=tenant_id::text and object_name ~ '^[0-9a-f-]{36}[.][a-z0-9]{1,10}$'),
+  check ((status='pending' and upload_token_hash is not null and deleted_at is null) or
+    (status='ready' and upload_token_hash is null and deleted_at is null) or
+    (status='deleting' and upload_token_hash is null and deleted_at is null) or
+    (status='deleted' and upload_token_hash is null and deleted_at is not null)),
+  foreign key (created_by,tenant_id) references public.bff_members(id,tenant_id),
+  foreign key (updated_by,tenant_id) references public.bff_members(id,tenant_id)
+);
+create index if not exists bff_resources_tenant_ready_idx
+  on public.bff_resources(tenant_id,created_at desc,id desc) where status='ready';
+create index if not exists bff_resources_cleanup_idx
+  on public.bff_resources(status,created_at,id) where status in ('pending','deleting');
+revoke all on sequence public.bff_resources_id_seq from public,anon,authenticated,service_role;
+grant usage,select on sequence public.bff_resources_id_seq to service_role;
+create or replace function public.bff_guard_resource_identity()
+returns trigger language plpgsql security invoker set search_path='' as $$
+begin
+  if NEW.id is distinct from OLD.id or NEW.tenant_id is distinct from OLD.tenant_id or
+    NEW.storage_bucket is distinct from OLD.storage_bucket or NEW.storage_path is distinct from OLD.storage_path or
+    NEW.object_name is distinct from OLD.object_name or NEW.hash is distinct from OLD.hash or
+    NEW.mime_type is distinct from OLD.mime_type or NEW.suffix is distinct from OLD.suffix or
+    NEW.size_byte is distinct from OLD.size_byte or NEW.created_by is distinct from OLD.created_by or
+    NEW.created_at is distinct from OLD.created_at or NEW.version<OLD.version or
+    (OLD.status='pending' and NEW.status not in ('pending','ready','deleting')) or
+    (OLD.status='ready' and NEW.status not in ('ready','deleting')) or
+    (OLD.status='deleting' and NEW.status not in ('deleting','deleted')) or
+    (OLD.status='deleted' and NEW.status<>'deleted')
+  then raise exception 'BFF_RESOURCE_IDENTITY_IMMUTABLE'; end if;
+  return NEW;
+end $$;
+drop trigger if exists bff_resource_identity_guard on public.bff_resources;
+create trigger bff_resource_identity_guard before update on public.bff_resources
+  for each row execute function public.bff_guard_resource_identity();
 create or replace function public.bff_guard_branding_identity()
 returns trigger language plpgsql security invoker set search_path='' as $$
 begin
@@ -429,13 +508,13 @@ create trigger bff_platform_settings_scope_guard before update on public.bff_pla
   for each row execute function public.bff_guard_branding_identity();
 create table if not exists public.bff_resource_revisions (
   tenant_id uuid not null,
-  resource text not null check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces','releases','branding')),
+  resource text not null check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces','releases','branding','resources')),
   version bigint not null default 1 check (version > 0),
   primary key (tenant_id,resource)
 );
 alter table public.bff_resource_revisions drop constraint if exists bff_resource_revisions_resource_check;
 alter table public.bff_resource_revisions add constraint bff_resource_revisions_resource_check
-  check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces','releases','branding'));
+  check (resource in ('menus','dictionaries','roles','members','upstreams','interfaces','releases','branding','resources'));
 create table if not exists public.bff_menus (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null,
@@ -1384,29 +1463,32 @@ begin
       ('BffInterfaces','BffServiceManagement','/interfaces','/bff/interfaces/index','接口编排','ri:flow-chart','menu',2),
       ('BffReleases','BffServiceManagement','/releases','/bff/releases/index','版本发布','ri:git-branch-line','menu',3),
       ('BffDataCenter',null,'/data-center','/index/index','数据中心','ri:database-2-line','folder',91),
-      ('Dict','BffDataCenter','/data-center/dict','/shared/data-center/dict','字典管理','ri:book-2-line','menu',1)
+      ('Dict','BffDataCenter','/data-center/dict','/shared/data-center/dict','字典管理','ri:book-2-line','menu',1),
+      ('BffResources','BffDataCenter','/data-center/attachment','/shared/data-center/attachment','资源管理','ri:attachment-2','menu',2)
     ) as installed(name,parent_name,path,component,title,icon,type,sort) loop
       parent:=null;
       if entry.parent_name is not null then select id into parent from public.bff_menus where tenant_id=actor.tenant_id and name=entry.parent_name; end if;
       insert into public.bff_menus(tenant_id,parent_id,name,path,component,type,sort,meta,builtin,create_by,update_by)
         values(actor.tenant_id,parent,entry.name,entry.path,entry.component,entry.type,entry.sort,jsonb_build_object('title',entry.title,'icon',entry.icon,
-          'isEnable',entry.name not in ('BffInterfaces','BffReleases','BffBranding'),'keepAlive',true),true,actor.id,actor.id)
+          'isEnable',entry.name not in ('BffInterfaces','BffReleases','BffBranding','BffResources'),'keepAlive',true),true,actor.id,actor.id)
         on conflict (tenant_id,name) do nothing;
     end loop;
     for entry in select * from (values('BffApplications','BffApplication'),('Menu','System:Menu'),('Role','System:Role'),('User','System:Member'),
       ('BffUpstreams','BffUpstream'),('BffInterfaces','BffInterface'),
-      ('BffReleases','BffRelease'),('BffBranding','BffBrand'),('Dict','DataCenter:Dict')) as pages(name,mark) loop
+      ('BffReleases','BffRelease'),('BffBranding','BffBrand'),('BffResources','BffResource'),
+      ('Dict','DataCenter:Dict')) as pages(name,mark) loop
       select id into page from public.bff_menus where tenant_id=actor.tenant_id and name=entry.name;
       foreach action in array case when entry.mark='BffApplication' then array['View','Add','Edit','Grant']
         when entry.mark='BffUpstream' then array['View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete']
         when entry.mark='BffInterface' then array['View','Add','Edit','Validate','Test','TestWrite','Delete']
         when entry.mark='BffRelease' then array['View','Publish','Rollback','ChangeStatus']
         when entry.mark='BffBrand' then array['View','Edit']
+        when entry.mark='BffResource' then array['View','Add','Edit','Delete']
         when entry.mark='System:Role' then array['View','Add','Edit','Delete','AssignPermission','AssignUser']
         when entry.mark='System:Member' then array['View','Edit'] else array['View','Add','Edit','Delete'] end loop
         insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
           values(actor.tenant_id,page,entry.mark||':'||action,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then '新增' when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Publish' then '发布版本' when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
-            'isEnable',entry.mark not in ('BffInterface','BffRelease','BffBrand')),true,actor.id,actor.id)
+            'isEnable',entry.mark not in ('BffInterface','BffRelease','BffBrand','BffResource')),true,actor.id,actor.id)
           on conflict (tenant_id,name) do nothing;
       end loop;
       if entry.mark='BffInterface' then
@@ -1476,6 +1558,7 @@ end $$;
 create or replace function public.bff_write_branding(p_actor uuid,p_version integer,p_config jsonb)
 returns jsonb language plpgsql security invoker set search_path='' as $$
 declare actor public.bff_members; current_record public.bff_platform_settings; revision bigint; changed jsonb;
+  branding_url text; resource_id bigint;
 begin
   if p_version is null or p_version<0 or not public.bff_valid_branding(p_config)
   then raise exception 'BFF_INVALID_BRANDING'; end if;
@@ -1483,6 +1566,17 @@ begin
   select * into actor from public.bff_members where id=p_actor and enabled;
   select * into current_record from public.bff_platform_settings where tenant_id=actor.tenant_id for update;
   if coalesce(current_record.version,0)<>p_version then raise exception 'BFF_CONFLICT'; end if;
+  foreach branding_url in array array[p_config->>'logoUrl',p_config->>'faviconUrl'] loop
+    if left(branding_url,15)='/api/resources/' then
+      if branding_url !~ '^/api/resources/[1-9][0-9]*/content$' then raise exception 'BFF_INVALID_BRANDING_RESOURCE'; end if;
+      begin resource_id:=pg_catalog.split_part(branding_url,'/',4)::bigint;
+      exception when others then raise exception 'BFF_INVALID_BRANDING_RESOURCE'; end;
+      if not exists(select 1 from public.bff_resources r where r.id=resource_id and r.tenant_id=actor.tenant_id and
+        r.status='ready' and r.mime_type in ('image/png','image/jpeg','image/webp','image/gif',
+          'image/x-icon','image/vnd.microsoft.icon'))
+      then raise exception 'BFF_INVALID_BRANDING_RESOURCE'; end if;
+    end if;
+  end loop;
   select coalesce(jsonb_agg(entry.field order by entry.field),'[]'::jsonb) into changed
     from jsonb_object_keys(p_config) as entry(field)
     where p_config->entry.field is distinct from current_record.config->entry.field;
@@ -1506,6 +1600,242 @@ revoke all on function public.bff_valid_branding(jsonb),public.bff_guard_brandin
   public.bff_write_branding(uuid,integer,jsonb),public.bff_session_context(uuid) from public,anon,authenticated;
 grant execute on function public.bff_valid_branding(jsonb),public.bff_guard_branding_identity(),public.bff_read_branding(uuid),
   public.bff_write_branding(uuid,integer,jsonb),public.bff_session_context(uuid) to service_role;
+create or replace function public.bff_resource_public(p_id bigint)
+returns jsonb language sql stable security invoker set search_path='' as $$
+select jsonb_build_object('id',r.id,'tenantId',r.tenant_id,'originName',r.origin_name,
+  'mimeType',r.mime_type,'suffix',r.suffix,'sizeByte',r.size_byte,
+  'sizeInfo',pg_catalog.pg_size_pretty(r.size_byte),'url','/api/resources/'||r.id::text||'/content',
+  'version',r.version,'createdAt',r.created_at,'updatedAt',r.updated_at)
+from public.bff_resources r where r.id=p_id and r.status='ready'
+$$;
+create or replace function public.bff_resource_reserve(
+  p_actor uuid,p_name text,p_mime text,p_suffix text,p_size bigint,p_hash text)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources; token text; object_name text;
+begin
+  if p_name is null or length(pg_catalog.btrim(p_name)) not between 1 and 255 or
+    p_name ~ '[[:cntrl:]/\\]' or p_size not between 1 and 10485760 or
+    p_hash is null or p_hash !~ '^[0-9a-f]{64}$' or
+    p_suffix is null or p_suffix !~ '^[a-z0-9]{1,10}$' or
+    lower(pg_catalog.btrim(p_name)) not like '%.'||p_suffix or
+    length(pg_catalog.btrim(p_name))<=length(p_suffix)+1 or
+    p_mime is null or not exists(select 1 from storage.buckets b where b.id='bff-assets' and
+      p_mime=any(b.allowed_mime_types))
+  then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  perform public.bff_control_lock(p_actor,'BffResource:Add','resources');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  token:=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(gen_random_uuid()::text||gen_random_uuid()::text,'UTF8'),'sha256'),'hex');
+  object_name:=gen_random_uuid()::text||'.'||p_suffix;
+  insert into public.bff_resources(tenant_id,storage_path,object_name,origin_name,mime_type,suffix,
+    size_byte,hash,upload_token_hash,created_by,updated_by)
+    values(actor.tenant_id,actor.tenant_id::text,object_name,pg_catalog.btrim(p_name),p_mime,p_suffix,
+      p_size,p_hash,pg_catalog.encode(extensions.digest(pg_catalog.convert_to(token,'UTF8'),'sha256'),'hex'),
+      p_actor,p_actor) returning * into saved;
+  perform public.bff_control_advance(p_actor,'resources','resource.reserve',null,
+    jsonb_build_object('resourceId',saved.id,'sizeByte',saved.size_byte));
+  return jsonb_build_object('id',saved.id,'storageBucket',saved.storage_bucket,
+    'objectKey',saved.storage_path||'/'||saved.object_name,'uploadToken',token);
+end $$;
+create or replace function public.bff_resource_complete(p_actor uuid,p_id bigint,p_token text)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources;
+begin
+  if p_id is null or p_token is null or p_token !~ '^[0-9a-f]{64}$' then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  perform public.bff_control_lock(p_actor,'BffResource:Add','resources');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  select * into saved from public.bff_resources where id=p_id and tenant_id=actor.tenant_id for update;
+  if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if saved.status<>'pending' or saved.created_by<>p_actor or saved.created_at<=now()-interval '1 hour' or
+    saved.upload_token_hash is distinct from
+      pg_catalog.encode(extensions.digest(pg_catalog.convert_to(p_token,'UTF8'),'sha256'),'hex')
+  then raise exception 'BFF_RESOURCE_RESERVATION_EXPIRED'; end if;
+  update public.bff_resources set status='ready',upload_token_hash=null,version=version+1,
+    updated_by=p_actor,updated_at=now() where id=p_id;
+  perform public.bff_control_advance(p_actor,'resources','resource.complete',null,
+    jsonb_build_object('resourceId',p_id));
+  return public.bff_resource_public(p_id);
+end $$;
+create or replace function public.bff_read_resources(
+  p_actor uuid,p_from integer default 0,p_to integer default 29,p_name text default '',p_suffixes text[] default array[]::text[])
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; total integer; records jsonb;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffResource:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_from is null or p_to is null or p_from<0 or p_to<p_from or p_to-p_from>99 or p_to>1000000 or
+    p_name is null or length(p_name)>100 or p_suffixes is null or cardinality(p_suffixes)>50 or
+    exists(select 1 from unnest(p_suffixes) as suffix(value) where suffix.value is null or
+      suffix.value !~ '^[a-z0-9]{1,10}$')
+  then raise exception 'BFF_INVALID_FILTER'; end if;
+  select count(*) into total from public.bff_resources r where r.tenant_id=actor.tenant_id and r.status='ready' and
+    (p_name='' or r.origin_name ilike '%'||p_name||'%') and
+    (cardinality(p_suffixes)=0 or r.suffix=any(p_suffixes));
+  select coalesce(jsonb_agg(public.bff_resource_public(q.id) order by q.created_at desc,q.id desc),'[]'::jsonb)
+    into records from (select r.id,r.created_at from public.bff_resources r
+      where r.tenant_id=actor.tenant_id and r.status='ready' and
+        (p_name='' or r.origin_name ilike '%'||p_name||'%') and
+        (cardinality(p_suffixes)=0 or r.suffix=any(p_suffixes))
+      order by r.created_at desc,r.id desc limit p_to-p_from+1 offset p_from) q;
+  return jsonb_build_object('data',records,'total',total);
+end $$;
+create or replace function public.bff_rename_resource(p_actor uuid,p_id bigint,p_version integer,p_name text)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources;
+begin
+  if p_id is null or p_version is null or p_version<1 or p_name is null or
+    length(pg_catalog.btrim(p_name)) not between 1 and 255 or p_name ~ '[[:cntrl:]/\\]'
+  then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  perform public.bff_control_lock(p_actor,'BffResource:Edit','resources');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  select * into saved from public.bff_resources where id=p_id and tenant_id=actor.tenant_id for update;
+  if saved.id is null or saved.status<>'ready' then raise exception 'BFF_NOT_FOUND'; end if;
+  if saved.version<>p_version then raise exception 'BFF_CONFLICT'; end if;
+  if lower(pg_catalog.btrim(p_name)) not like '%.'||saved.suffix or
+    length(pg_catalog.btrim(p_name))<=length(saved.suffix)+1
+  then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  update public.bff_resources set origin_name=pg_catalog.btrim(p_name),version=version+1,
+    updated_by=p_actor,updated_at=now() where id=p_id;
+  perform public.bff_control_advance(p_actor,'resources','resource.rename',null,
+    jsonb_build_object('resourceId',p_id));
+  return public.bff_resource_public(p_id);
+end $$;
+create or replace function public.bff_resource_references(p_actor uuid,p_ids bigint[])
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; result jsonb;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffResource:Delete') then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_ids is null or cardinality(p_ids) not between 1 and 100 or
+    exists(select 1 from unnest(p_ids) as requested(id) where requested.id is null or
+      not exists(select 1 from public.bff_resources r where r.id=requested.id and
+        r.tenant_id=actor.tenant_id and r.status='ready'))
+  then raise exception 'BFF_NOT_FOUND'; end if;
+  select coalesce(jsonb_agg(jsonb_build_object('resourceId',r.id,
+    'sourceTable','bff_platform_settings','dependencyCode',field.name,
+    'recordId',s.tenant_id,'targetId',r.id,'recordNo',s.config->>'siteName',
+    'recordSummary',case field.name when 'logoUrl' then '系统 Logo 正在使用' else '浏览器图标正在使用' end,
+    'createdAt',s.updated_at,'cleanupAllowed',false) order by r.id,field.name),'[]'::jsonb)
+    into result from public.bff_resources r
+    join public.bff_platform_settings s on s.tenant_id=r.tenant_id
+    cross join lateral (values('logoUrl'::text),('faviconUrl'::text)) as field(name)
+    where r.tenant_id=actor.tenant_id and r.id=any(p_ids) and
+      s.config->>field.name='/api/resources/'||r.id::text||'/content';
+  return result;
+end $$;
+create or replace function public.bff_resource_delete_begin(p_actor uuid,p_id bigint,p_version integer)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources; token text;
+begin
+  if p_id is null or p_version is null or p_version<1 then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  perform public.bff_control_lock(p_actor,'BffResource:Delete','resources');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  -- Brand writers take the same tenant control lock, then brand row, then resource row.
+  perform 1 from public.bff_platform_settings where tenant_id=actor.tenant_id for update;
+  select * into saved from public.bff_resources where id=p_id and tenant_id=actor.tenant_id for update;
+  if saved.id is null or saved.status<>'ready' then raise exception 'BFF_NOT_FOUND'; end if;
+  if saved.version<>p_version then raise exception 'BFF_CONFLICT'; end if;
+  if public.bff_resource_references(p_actor,array[p_id])<>'[]'::jsonb then raise exception 'BFF_REFERENCED'; end if;
+  token:=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(gen_random_uuid()::text||gen_random_uuid()::text,'UTF8'),'sha256'),'hex');
+  update public.bff_resources set status='deleting',version=version+1,
+    cleanup_token_hash=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(token,'UTF8'),'sha256'),'hex'),
+    cleanup_lease_until=now()+interval '2 minutes',updated_by=p_actor,updated_at=now()
+    where id=p_id;
+  perform public.bff_control_advance(p_actor,'resources','resource.delete_begin',null,
+    jsonb_build_object('resourceId',p_id));
+  return jsonb_build_object('id',p_id,'storageBucket',saved.storage_bucket,
+    'objectKey',saved.storage_path||'/'||saved.object_name,'cleanupToken',token);
+end $$;
+create or replace function public.bff_resource_content(p_actor uuid,p_id bigint)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; saved public.bff_resources; is_brand boolean;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  select * into saved from public.bff_resources where id=p_id and tenant_id=actor.tenant_id and status='ready';
+  if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  select exists(select 1 from public.bff_platform_settings s where s.tenant_id=actor.tenant_id and
+    (s.config->>'logoUrl'='/api/resources/'||p_id::text||'/content' or
+      s.config->>'faviconUrl'='/api/resources/'||p_id::text||'/content')) into is_brand;
+  if not public.bff_actor_can(p_actor,'BffResource:View') and not
+    (is_brand and saved.mime_type in ('image/png','image/jpeg','image/webp','image/gif',
+      'image/x-icon','image/vnd.microsoft.icon'))
+  then raise exception 'BFF_FORBIDDEN'; end if;
+  return jsonb_build_object('id',saved.id,'storageBucket',saved.storage_bucket,
+    'objectKey',saved.storage_path||'/'||saved.object_name,'mimeType',saved.mime_type,
+    'sizeByte',saved.size_byte,'originName',saved.origin_name);
+end $$;
+create or replace function public.bff_resource_names(p_actor uuid,p_ids bigint[])
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; result jsonb; can_view boolean;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_ids is null or cardinality(p_ids)>50 or exists(select 1 from unnest(p_ids) as requested(id)
+    where requested.id is null or requested.id<1 or requested.id>9007199254740991)
+  then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  can_view:=public.bff_actor_can(p_actor,'BffResource:View');
+  select coalesce(jsonb_agg(jsonb_build_object('id',r.id,'originName',r.origin_name)
+    order by requested.ordinality),'[]'::jsonb) into result
+    from unnest(p_ids) with ordinality as requested(id,ordinality)
+    join public.bff_resources r on r.id=requested.id and r.tenant_id=actor.tenant_id and r.status='ready'
+    where can_view or (r.mime_type in ('image/png','image/jpeg','image/webp','image/gif',
+      'image/x-icon','image/vnd.microsoft.icon') and exists(select 1 from public.bff_platform_settings s
+        where s.tenant_id=actor.tenant_id and
+          (s.config->>'logoUrl'='/api/resources/'||r.id::text||'/content' or
+           s.config->>'faviconUrl'='/api/resources/'||r.id::text||'/content')));
+  return result;
+end $$;
+create or replace function public.bff_resource_cleanup_claim(p_limit integer default 20)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare candidate public.bff_resources; token text; results jsonb:='[]'::jsonb;
+begin
+  if p_limit is null or p_limit not between 1 and 100 then raise exception 'BFF_INVALID_LIMIT'; end if;
+  for candidate in select * from public.bff_resources where
+    ((status='pending' and created_at<=now()-interval '1 hour') or status='deleting') and
+    (cleanup_lease_until is null or cleanup_lease_until<=now())
+    order by created_at,id limit p_limit for update skip locked
+  loop
+    token:=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(gen_random_uuid()::text||gen_random_uuid()::text,'UTF8'),'sha256'),'hex');
+    update public.bff_resources set status='deleting',upload_token_hash=null,
+      cleanup_token_hash=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(token,'UTF8'),'sha256'),'hex'),
+      cleanup_lease_until=now()+interval '2 minutes',
+      version=case when status='pending' then version+1 else version end,updated_at=now()
+      where id=candidate.id;
+    results:=results||jsonb_build_array(jsonb_build_object('id',candidate.id,
+      'storageBucket',candidate.storage_bucket,
+      'objectKey',candidate.storage_path||'/'||candidate.object_name,'cleanupToken',token));
+  end loop;
+  return results;
+end $$;
+create or replace function public.bff_resource_cleanup_finish(p_id bigint,p_token text)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare saved public.bff_resources;
+begin
+  if p_id is null or p_token is null or p_token !~ '^[0-9a-f]{64}$' then raise exception 'BFF_INVALID_RESOURCE'; end if;
+  select * into saved from public.bff_resources where id=p_id for update;
+  if saved.id is null then raise exception 'BFF_NOT_FOUND'; end if;
+  if saved.status='deleted' then return jsonb_build_object('deleted',true); end if;
+  if saved.status<>'deleting' or saved.cleanup_token_hash is distinct from
+    pg_catalog.encode(extensions.digest(pg_catalog.convert_to(p_token,'UTF8'),'sha256'),'hex')
+  then raise exception 'BFF_RESOURCE_CLEANUP_LEASE'; end if;
+  update public.bff_resources set status='deleted',deleted_at=now(),cleanup_token_hash=null,
+    cleanup_lease_until=null,version=version+1,updated_at=now() where id=p_id;
+  return jsonb_build_object('deleted',true);
+end $$;
+revoke all on function public.bff_guard_resource_identity(),public.bff_resource_public(bigint),
+  public.bff_resource_reserve(uuid,text,text,text,bigint,text),public.bff_resource_complete(uuid,bigint,text),
+  public.bff_read_resources(uuid,integer,integer,text,text[]),public.bff_rename_resource(uuid,bigint,integer,text),
+  public.bff_resource_references(uuid,bigint[]),public.bff_resource_delete_begin(uuid,bigint,integer),
+  public.bff_resource_content(uuid,bigint),public.bff_resource_names(uuid,bigint[]),
+  public.bff_resource_cleanup_claim(integer),public.bff_resource_cleanup_finish(bigint,text)
+  from public,anon,authenticated;
+grant execute on function public.bff_guard_resource_identity(),public.bff_resource_public(bigint),
+  public.bff_resource_reserve(uuid,text,text,text,bigint,text),public.bff_resource_complete(uuid,bigint,text),
+  public.bff_read_resources(uuid,integer,integer,text,text[]),public.bff_rename_resource(uuid,bigint,integer,text),
+  public.bff_resource_references(uuid,bigint[]),public.bff_resource_delete_begin(uuid,bigint,integer),
+  public.bff_resource_content(uuid,bigint),public.bff_resource_names(uuid,bigint[]),
+  public.bff_resource_cleanup_claim(integer),public.bff_resource_cleanup_finish(bigint,text)
+  to service_role;
 -- Application reads re-evaluate the current member and role grants in the same
 -- database statement that selects data. A cached HTTP session is not authority.
 create or replace function public.bff_read_applications(p_actor uuid,p_page integer,p_size integer,p_keyword text)
@@ -2879,6 +3209,7 @@ alter table public.bff_interface_version_upstreams enable row level security;
 alter table public.bff_interface_deployments enable row level security;
 alter table public.bff_interface_release_events enable row level security;
 alter table public.bff_interface_calls enable row level security;
+alter table public.bff_resources enable row level security;
 revoke all on public.bff_interface_versions,public.bff_interface_version_upstreams,
   public.bff_interface_deployments,public.bff_interface_release_events,public.bff_interface_calls
   from public,anon,authenticated;
@@ -2888,6 +3219,8 @@ revoke all on public.bff_interface_versions,public.bff_interface_version_upstrea
 grant select,insert,update,delete on public.bff_interface_versions,public.bff_interface_version_upstreams,
   public.bff_interface_deployments,public.bff_interface_release_events,public.bff_interface_calls
   to service_role;
+revoke all on public.bff_resources from public,anon,authenticated,service_role;
+grant select,insert,update,delete on public.bff_resources to service_role;
 alter table public.bff_resource_revisions enable row level security;
 alter table public.bff_platform_settings enable row level security;
 revoke all on public.bff_platform_settings from public,anon,authenticated,service_role;
