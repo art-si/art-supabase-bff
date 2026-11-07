@@ -112,19 +112,34 @@ begin
     perform public.bff_rename_resource(admin_a,document_id,3,'spoofed.exe');
     raise exception 'Rename changed the verified file extension';
   exception when raise_exception then if sqlerrm<>'BFF_INVALID_RESOURCE' then raise; end if; end;
-  brand:=jsonb_build_object('siteName','BFF平台','siteShortName','BFF','siteDescription','',
-    'logoUrl','/api/resources/'||image_id::text||'/content','faviconUrl','',
-    'watermarkEnabled',false,'watermarkContentType','username','watermarkCustomText','');
+  brand:='{"siteName":"BFF平台","siteShortName":"BFF","siteDescription":"",
+    "logoUrl":"","faviconUrl":"","wordmarkImageEnabled":false,
+    "wordmarkLightUrl":"","wordmarkDarkUrl":"","watermarkEnabled":false,
+    "watermarkContentType":"username","watermarkCustomText":"","loginTitle":"欢迎使用 BFF 平台",
+    "loginSubtitle":"","loginDescription":"","defaultLanguage":"zh","captchaEnabled":true,
+    "captchaType":"turnstile","turnstileSiteKey":"0x4AAAAAADqOIVodNJNAZL57",
+    "turnstileSize":"normal","turnstileTheme":"auto","captchaMaxAttempts":0,
+    "captchaLockMinutes":10,"registerEnabled":true,"authChannels":[],
+    "maintenanceEnabled":false,"maintenanceMessage":"","seoTitle":"BFF平台",
+    "seoKeywords":"","seoDescription":"","contactEmail":"","contactPhone":"",
+    "contactAddress":"","copyrightText":"© BFF平台","icpRecord":"",
+    "policeRecord":"","enabled":true}'::jsonb||
+    jsonb_build_object('logoUrl','/api/resources/'||image_id::text||'/content');
   perform public.bff_write_branding(admin_a,0,brand);
   if jsonb_array_length(public.bff_resource_references(admin_a,array[image_id]))<>1 or
     public.bff_resource_content(viewer,image_id)->>'objectKey'<>key_a
   then raise exception 'Brand reference or scoped content lookup failed'; end if;
+  perform public.bff_write_branding(admin_a,1,brand||
+    jsonb_build_object('wordmarkLightUrl','/api/resources/'||image_id::text||'/content'));
+  if jsonb_array_length(public.bff_resource_references(admin_a,array[image_id]))<>2
+  then raise exception 'Brand wordmark reference was not protected'; end if;
+  perform public.bff_write_branding(admin_a,2,brand);
   begin
     perform public.bff_resource_delete_begin(admin_a,image_id,2);
     raise exception 'Referenced brand image deleted';
   exception when raise_exception then if sqlerrm<>'BFF_REFERENCED' then raise; end if; end;
   begin
-    perform public.bff_write_branding(admin_a,1,brand||
+    perform public.bff_write_branding(admin_a,3,brand||
       jsonb_build_object('logoUrl','/api/resources/'||foreign_id::text||'/content'));
     raise exception 'Foreign brand resource accepted';
   exception when raise_exception then if sqlerrm<>'BFF_INVALID_BRANDING_RESOURCE' then raise; end if; end;
@@ -167,7 +182,7 @@ begin
     raise exception 'Wrong cleanup token finished resource';
   exception when raise_exception then if sqlerrm<>'BFF_RESOURCE_CLEANUP_LEASE' then raise; end if; end;
   perform public.bff_resource_cleanup_finish(stale_id,cleanup_token);
-  perform public.bff_write_branding(admin_a,1,brand||'{"logoUrl":"https://assets.example.test/logo.png"}'::jsonb);
+  perform public.bff_write_branding(admin_a,3,brand||'{"logoUrl":"https://assets.example.test/logo.png"}'::jsonb);
   result:=public.bff_resource_delete_begin(admin_a,image_id,2);
   if result->>'objectKey'<>key_a then raise exception 'Released brand image cannot be deleted'; end if;
   update public.bff_members set enabled=false where id=viewer;

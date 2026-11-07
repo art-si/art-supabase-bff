@@ -1,45 +1,61 @@
-import { normalizeNonNullableText } from '@/utils/form/normalize'
-import { BffApiError, call } from '@bff/api/bff'
+import { omit } from 'lodash-es'
+import { BffApiError, bffSession, call } from '@bff/api/bff'
 import { websiteConfigFromBranding } from '@bff/config/branding'
 import type { BffBrandingRecord, BffBrandingWriteInput } from '@bff/types/branding'
 
-type WebsiteConfig = Api.SystemManage.WebsiteConfigItem & { version?: number }
+type WebsiteConfig = Api.SystemManage.WebsiteConfigItem
 
 /** Supplies the common pro page/composable with the current BFF tenant's public brand values. */
-export async function fetchWebsiteConfig(): Promise<{ data: WebsiteConfig; error: null }> {
+export async function fetchWebsiteConfig(): Promise<{
+  data: WebsiteConfig
+  error: null
+  canPublish: boolean
+}> {
   const record = await call<BffBrandingRecord>('/api/control/branding')
   return {
     data: websiteConfigFromBranding(record),
-    error: null
+    error: null,
+    canPublish: Boolean(bffSession.value?.permissions.includes('System:WebsiteConfig:Publish'))
   }
 }
 
-export async function saveWebsiteConfig(params: WebsiteConfig): Promise<{ error: null }> {
+export async function saveWebsiteConfig(params: WebsiteConfig): Promise<{ error: unknown | null }> {
   if (
     typeof params.version !== 'number' ||
     !Number.isSafeInteger(params.version) ||
     params.version < 0
   )
-    throw new BffApiError('配置版本缺失，请重新加载后再保存', 409)
+    return { error: new BffApiError('配置版本缺失，请重新加载后再保存', 409) }
   const input: BffBrandingWriteInput = {
     version: params.version,
-    config: {
-      siteName: normalizeNonNullableText(params.siteName),
-      siteShortName: normalizeNonNullableText(params.siteShortName),
-      siteDescription: normalizeNonNullableText(params.siteDescription),
-      logoUrl: normalizeNonNullableText(params.logoUrl),
-      faviconUrl: normalizeNonNullableText(params.faviconUrl),
-      watermarkEnabled: params.watermarkEnabled,
-      watermarkContentType: params.watermarkContentType,
-      watermarkCustomText: normalizeNonNullableText(params.watermarkCustomText)
+    config: omit(params, [
+      'id',
+      'version',
+      'tenantId',
+      'paramMeta',
+      'createBy',
+      'createTime',
+      'updateBy',
+      'updateTime'
+    ])
+  }
+  try {
+    await call('/api/control/branding', { method: 'POST', body: JSON.stringify(input) })
+  } catch (error) {
+    return {
+      error:
+        error instanceof BffApiError && error.status === 409
+          ? new Error('配置已被其他人更新。当前输入已保留，请刷新页面核对后重试', {
+              cause: error
+            })
+          : error instanceof BffApiError
+            ? error
+            : new Error('网站配置发布失败，请稍后重试', { cause: error })
     }
   }
-  await call('/api/control/branding', { method: 'POST', body: JSON.stringify(input) })
   return { error: null }
 }
 
-/** The shared full-profile module can import this symbol; BFF branding never invokes it. */
 export const generateWebsiteWordmark: typeof import('art-supabase-pro/src/api/system-manage/website-config').generateWebsiteWordmark =
-  async () => {
-    throw new BffApiError('当前平台未启用品牌字图生成', 403)
-  }
+  (params) =>
+    call('/api/control/branding/wordmark', { method: 'POST', body: JSON.stringify(params) })
