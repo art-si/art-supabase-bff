@@ -329,7 +329,7 @@ async function prepareRelease(
       p_actor: session.member.id,
       p_interface: uuid(id),
       p_purpose: purpose,
-      p_version_id: targetVersionId ? uuid(targetVersionId) : null
+      ...(targetVersionId ? { p_version_id: uuid(targetVersionId) } : {})
     },
     { get: true }
   )

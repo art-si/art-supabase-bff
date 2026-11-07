@@ -1,3 +1,4 @@
+import { dictionarySnapshot } from '../fixtures/dictionaries'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
@@ -92,7 +93,7 @@ async function mockApplications(page: Page) {
       return
     }
     if (url.pathname === '/api/control/dictionaries' && method === 'GET') {
-      await reply({ revision: 1, types: [], items: [] })
+      await reply(dictionarySnapshot())
       return
     }
     if (url.pathname === '/api/control/table-columns' && method === 'GET') {

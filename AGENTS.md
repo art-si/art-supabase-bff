@@ -7,3 +7,5 @@
 - Authorization comes from active BFF memberships; never infer BFF administrator permissions from email, user-editable metadata, or successful authentication alone.
 - No per-version migration SQL files. Maintain the canonical BFF schema in `server/database/schema.sql`, apply deliberately through the scoped CLI, and verify database permissions and tenant isolation.
 - Business navigation is delivered by the authenticated backend session. Public routes are limited to auth and error/framework routes.
+
+- Shared pro pages must use the complete published pro interface. Do not pass host-specific profile, canEdit, organizationScope, or layout-trimming flags. Keep BFF data and authorization integration in API providers and server handlers, publish shared changes in pro, and upgrade this repository to that fixed package release.

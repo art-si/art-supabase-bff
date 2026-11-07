@@ -699,7 +699,23 @@ async function run(): Promise<void> {
       1,
       '/api/gateway/http-release-a/development/orders/fail?include=customer'
     )
-    assert.equal(upstreamFailed.status, 502)
+    if (upstreamFailed.status !== 502) {
+      const call = await database
+        .from('bff_interface_calls')
+        .select('status,error_code,error_class,http_status,steps')
+        .eq('request_id', upstreamFailed.requestId)
+        .eq('tenant_id', tenantA)
+        .maybeSingle()
+      throw new Error(
+        `Expected safe upstream failure: ${JSON.stringify({
+          httpStatus: upstreamFailed.status,
+          code: isObjectRecord(upstreamFailed.body) ? upstreamFailed.body.code : null,
+          requestId: upstreamFailed.requestId,
+          outboundDelta: requests.length - failureStart,
+          call: call.error ? { errorCode: call.error.code } : call.data
+        })}`
+      )
+    }
     assert.equal(requests.length, failureStart + 1)
     assert.ok(typeof record(upstreamFailed.body).requestId === 'string')
 
@@ -716,6 +732,7 @@ async function run(): Promise<void> {
     const raceKey = randomUUID()
     const raceCount = requests.length
     const raceRoute = '/api/gateway/http-release-a/development/quote/race'
+    const raceStartedAt = Date.now()
     const running = api(0, raceRoute, 'POST', { weight: 2 }, { 'Idempotency-Key': raceKey })
     await Promise.race([
       raceStarted,
@@ -730,7 +747,24 @@ async function run(): Promise<void> {
     raceFinish?.()
     holdRace = false
     const raceResult = await running
-    assert.equal(raceResult.status, 200)
+    if (raceResult.status !== 200) {
+      const call = await database
+        .from('bff_interface_calls')
+        .select('status,error_code,error_class,http_status,duration_ms,steps')
+        .eq('request_id', raceResult.requestId)
+        .eq('tenant_id', tenantA)
+        .maybeSingle()
+      throw new Error(
+        `Expected idempotent original success: ${JSON.stringify({
+          elapsedMs: Date.now() - raceStartedAt,
+          httpStatus: raceResult.status,
+          code: isObjectRecord(raceResult.body) ? raceResult.body.code : null,
+          requestId: raceResult.requestId,
+          duplicateStatus: duplicate.status,
+          call: call.error ? { errorCode: call.error.code } : call.data
+        })}`
+      )
+    }
     assert.equal(duplicate.requestId, raceResult.requestId)
     const raceReplay = await api(
       0,

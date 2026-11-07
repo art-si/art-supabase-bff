@@ -13,11 +13,10 @@
     >
       <template #actions><BusinessTableWorkspaceActions :table="tableQueryRef" /></template>
     </BusinessWorkspaceHeader>
-    <div class="application-page__workspace min-h-0 flex-1">
+    <div class="application-page__workspace business-workspace-content flex min-w-0 flex-col">
       <ArtTableQuery
         ref="tableQueryRef"
         v-model="table.search"
-        class="h-full"
         focusable
         focus-scope-selector=".application-page__workspace"
         :api-fn="loadApplications"
@@ -36,7 +35,9 @@
   </div>
 </template>
 <script setup lang="tsx">
-  import { ElButton, ElTag } from 'element-plus'
+  import ArtDictDisplay from '@/components/core/base/art-dict-display/index.vue'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
+  import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
   import { fetchApplications } from '@bff/api/bff'
   import { useAuth } from '@/hooks/core/useAuth'
   import BusinessTableRowActions from '@/components/business/business-table-row-actions/index.vue'
@@ -123,9 +124,11 @@
         label: '状态',
         width: 100,
         formatter: (row) => (
-          <ElTag type={row.enabled ? 'success' : 'info'} effect="light">
-            {row.enabled ? '启用' : '停用'}
-          </ElTag>
+          <ArtDictDisplay
+            dictCode={BFF_DICTIONARIES.applications.status}
+            value={String(row.enabled)}
+            display="tag"
+          />
         )
       },
       {
@@ -144,22 +147,21 @@
               formatter: (row: BffApplication) => (
                 <BusinessTableRowActions>
                   {hasAuth('BffApplication:Edit') && (
-                    <ElButton
-                      link
-                      type="primary"
+                    <ArtButtonTable
+                      type="edit"
+                      label="编辑"
+                      permission="BffApplication:Edit"
                       onClick={() => applicationDialogRef.value?.handleOpen(row)}
-                    >
-                      编辑
-                    </ElButton>
+                    />
                   )}
                   {hasAuth('BffApplication:Grant') && (
-                    <ElButton
-                      link
-                      type="primary"
+                    <ArtButtonTable
+                      type="edit"
+                      icon="ri:shield-user-line"
+                      label="成员授权"
+                      permission="BffApplication:Grant"
                       onClick={() => membersDialogRef.value?.handleOpen(row)}
-                    >
-                      成员授权
-                    </ElButton>
+                    />
                   )}
                 </BusinessTableRowActions>
               )

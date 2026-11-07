@@ -285,7 +285,7 @@ export async function listCalls(session: Session, url: URL): Promise<CallList> {
   }
   const result = await database.rpc(
     'bff_read_calls',
-    { p_actor: session.member.id, p_filters: filters },
+    { p_actor: session.member.id, p_filters: JSON.stringify(filters) },
     { get: true }
   )
   rpcFailure(result.error)
@@ -402,7 +402,7 @@ export async function listAlertRules(session: Session, url: URL): Promise<AlertR
   }
   const result = await database.rpc(
     'bff_read_alert_rules',
-    { p_actor: session.member.id, p_filters: filters },
+    { p_actor: session.member.id, p_filters: JSON.stringify(filters) },
     { get: true }
   )
   rpcFailure(result.error)
@@ -436,7 +436,7 @@ export async function listAlerts(session: Session, url: URL): Promise<AlertList>
   }
   const result = await database.rpc(
     'bff_read_alert_instances',
-    { p_actor: session.member.id, p_filters: filters },
+    { p_actor: session.member.id, p_filters: JSON.stringify(filters) },
     { get: true }
   )
   rpcFailure(result.error)

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { dictionarySnapshot } from '../fixtures/dictionaries'
 
 const adminId = '11111111-1111-4111-8111-111111111111'
 const observerId = '22222222-2222-4222-8222-222222222222'
@@ -73,7 +74,7 @@ async function mockBffApi(page: Page): Promise<void> {
         payload = session
         break
       case '/api/control/dictionaries':
-        payload = { revision: 1, types: [], items: [] }
+        payload = dictionarySnapshot()
         break
       case '/api/control/table-columns':
         payload = { mode: 'frontend', profile: null, columns: [] }
@@ -108,6 +109,14 @@ test.afterEach(async ({ page }) => {
 })
 
 test('initial dynamic route keeps recordId and hash, then clears the locator', async ({ page }) => {
+  const snapshot = dictionarySnapshot()
+  for (const item of snapshot.items) {
+    if (item.dictTypeTable.code === 'bffMemberAccessStatus' && item.value === 'enabled')
+      item.label = '启用（字典）'
+    if (item.dictTypeTable.code === 'bffMemberRole' && item.value === 'viewer')
+      item.label = '普通成员（字典）'
+  }
+  await page.route('**/api/control/dictionaries*', (route) => route.fulfill({ json: snapshot }))
   await page.goto(`/system/member?recordId=${observerId}#anchor`)
 
   await expect(page).toHaveURL(new RegExp(`/system/member\\?recordId=${observerId}#anchor$`))
@@ -120,6 +129,14 @@ test('initial dynamic route keeps recordId and hash, then clears the locator', a
   await expect(page).not.toHaveURL(/recordId=/)
   await expect(page.getByRole('row').filter({ hasText: '验收示例：接口观察员' })).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: '验收示例：服务维护员' })).toBeVisible()
+  await page
+    .getByRole('row')
+    .filter({ hasText: '验收示例：接口观察员' })
+    .getByRole('button', { name: '调整访问' })
+    .click()
+  const accessDialog = page.getByRole('dialog', { name: '调整成员访问' })
+  await expect(accessDialog.getByText('启用（字典）', { exact: true })).toBeVisible()
+  await expect(accessDialog.getByText('普通成员（字典）', { exact: true })).toBeVisible()
 })
 
 test('member keyword search can reach empty state and recover', async ({ page }) => {

@@ -30,6 +30,9 @@
 </template>
 
 <script setup lang="ts">
+  import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
+  const credentialActionOptions = useDictionaryOptions(BFF_DICTIONARIES.upstreams.credentialAction)
   import { ElMessage } from 'element-plus'
   import { useArtFeedback } from '@/hooks/core/useArtFeedback'
   import type { FormItem } from '@/components/core/forms/art-form/index.vue'
@@ -64,10 +67,7 @@
       label: '操作',
       type: 'segment',
       span: 24,
-      options: [
-        { label: '轮换凭据', value: 'rotate' },
-        { label: '清除凭据', value: 'clear' }
-      ],
+      options: credentialActionOptions,
       description:
         upstream.value?.status === 'active'
           ? '清除凭据前请先停用服务；轮换凭据可在启用状态下进行。'

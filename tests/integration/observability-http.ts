@@ -276,7 +276,7 @@ async function run(): Promise<void> {
     )
 
     const callList = await api(0, '/api/calls?size=20')
-    assert.equal(callList.status, 200)
+    assert.equal(callList.status, 200, JSON.stringify(callList.body))
     assert.equal(list(callList.body).length, 2)
     assert.equal((await api(0, '/api/calls/options')).status, 200)
     const detail = await api(0, `/api/calls/${failureId}`)

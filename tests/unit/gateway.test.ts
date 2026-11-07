@@ -4,6 +4,7 @@ import test from 'node:test'
 import type { Session } from '../../server/auth'
 import {
   gatewayInputHash,
+  gatewayStepCode,
   openGatewayReplay,
   parseGatewayInput,
   parseGatewayRoute,
@@ -15,6 +16,14 @@ import { interfaceFixture } from '../fixtures/interface-definition'
 
 const key = Buffer.alloc(32, 17).toString('base64')
 const otherKey = Buffer.alloc(32, 18).toString('base64')
+
+test('gateway log step codes use the SQL-safe stable uppercase vocabulary', () => {
+  assert.equal(gatewayStepCode('upstream_error'), 'UPSTREAM_ERROR')
+  assert.equal(gatewayStepCode('timeout'), 'TIMEOUT')
+  assert.equal(gatewayStepCode('FORBIDDEN'), 'FORBIDDEN')
+  assert.equal(gatewayStepCode('bad-code'), 'STEP_FAILED')
+  assert.equal(gatewayStepCode(null), null)
+})
 
 function published(overrides: Partial<PublishedExecution> = {}): PublishedExecution {
   const definition = interfaceFixture()

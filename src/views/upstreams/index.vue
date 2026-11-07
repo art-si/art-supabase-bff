@@ -48,12 +48,11 @@
       show-icon
     />
 
-    <div class="upstream-page__workspace min-h-0 flex-1">
+    <div class="upstream-page__workspace business-workspace-content flex min-w-0 flex-col">
       <ArtTableQuery
         ref="tableQueryRef"
         v-model="filters"
         v-model:show-search-bar="showSearchBar"
-        class="h-full"
         focusable
         focus-scope-selector=".upstream-page__workspace"
         :api-fn="loadUpstreams"
@@ -71,7 +70,7 @@
           emptyDescription: '可调整筛选条件；新服务从登记草稿开始配置。'
         }"
       >
-        <template #header-left>
+        <template v-if="locatedRecordId" #header-left>
           <div v-if="locatedRecordId" class="flex min-w-0 items-center gap-2" aria-live="polite">
             <ElTag type="primary" effect="plain" round>定位服务</ElTag>
             <span class="max-w-48 truncate text-xs text-g-700" :title="locatedRecordLabel">
@@ -90,6 +89,11 @@
 </template>
 
 <script setup lang="tsx">
+  import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
+  import ArtDictDisplay from '@/components/core/base/art-dict-display/index.vue'
+  const environmentOptions = useDictionaryOptions(BFF_DICTIONARIES.common.environment)
+  const statusOptions = useDictionaryOptions(BFF_DICTIONARIES.upstreams.status)
   import { ElButton, ElMessage, ElTag } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { useArtFeedback, notifyFriendlyError } from '@/hooks/core/useArtFeedback'
@@ -124,7 +128,6 @@
     UpstreamHealthStatus,
     UpstreamOptions,
     UpstreamService,
-    UpstreamStatus,
     UpstreamSummary
   } from '@bff/types/upstream'
   import UpstreamDialog from './modules/upstream-dialog.vue'
@@ -237,7 +240,7 @@
       props: {
         placeholder: '全部环境',
         clearable: true,
-        options: options.value?.environments ?? []
+        options: environmentOptions
       }
     },
     {
@@ -247,11 +250,7 @@
       props: {
         placeholder: '全部状态',
         clearable: true,
-        options: [
-          { label: '草稿', value: 'draft' },
-          { label: '已启用', value: 'active' },
-          { label: '已停用', value: 'disabled' }
-        ]
+        options: statusOptions
       }
     }
   ])
@@ -379,16 +378,7 @@
   }
 
   const environmentLabel = (value: UpstreamEnvironment): string =>
-    options.value?.environments.find((item) => item.value === value)?.label ??
-    { development: '开发', staging: '预发布', production: '生产' }[value]
-  const statusPresentation: Record<
-    UpstreamStatus,
-    { label: string; tone: 'info' | 'success' | 'warning' }
-  > = {
-    draft: { label: '草稿', tone: 'info' },
-    active: { label: '已启用', tone: 'success' },
-    disabled: { label: '已停用', tone: 'warning' }
-  }
+    environmentOptions.find((item) => item.value === value)?.label ?? '环境待核对'
   const healthPresentation: Record<
     UpstreamHealthStatus,
     { label: string; tone: 'info' | 'success' | 'danger' | 'warning' }
@@ -566,9 +556,11 @@
         label: '运行状态',
         minWidth: 105,
         formatter: (row) => (
-          <ElTag type={statusPresentation[row.status].tone} effect="light" round>
-            {statusPresentation[row.status].label}
-          </ElTag>
+          <ArtDictDisplay
+            dictCode={BFF_DICTIONARIES.upstreams.status}
+            value={row.status}
+            display="tag"
+          />
         )
       },
       {
@@ -578,7 +570,11 @@
         formatter: (row) => (
           <div class="grid gap-1 py-1 text-xs">
             <span class="text-g-900">
-              {{ none: '无认证', bearer: 'Bearer', api_key_header: 'API Key' }[row.authType]}
+              <ArtDictDisplay
+                dictCode={BFF_DICTIONARIES.upstreams.authType}
+                value={row.authType}
+                display="text"
+              />
             </span>
             <span class={row.credentialConfigured ? 'text-success' : 'text-g-700'}>
               {row.authType === 'none'

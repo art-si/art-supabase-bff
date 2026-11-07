@@ -411,6 +411,13 @@ function sameObservation(a: ReleaseUpstreamObservation, b: ReleaseUpstreamObserv
   )
 }
 
+/** Persist only bounded SQL-safe step codes; runner/network labels remain unchanged. */
+export function gatewayStepCode(code: string | null): string | null {
+  if (!code) return null
+  const normalized = code.toUpperCase()
+  return /^[A-Z][A-Z0-9_]{0,79}$/.test(normalized) ? normalized : 'STEP_FAILED'
+}
+
 /** Always responds with a server request ID. The caller has already authenticated the BFF session. */
 export async function handleGateway(
   req: IncomingMessage,
@@ -606,7 +613,7 @@ export async function handleGateway(
         p_steps: executionResult.steps.map((step) => ({
           key: step.key,
           status: step.status,
-          code: step.code,
+          code: gatewayStepCode(step.code),
           errorClass: step.errorClass,
           statusCode: step.statusCode,
           durationMs: step.durationMs

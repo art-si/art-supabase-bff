@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','InspectResources','InspectBffActivity','AuditBffSecurity','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation')][string]$Action = 'Inspect',
+  [ValidateSet('PrepareMemberDirectory','InspectBusinessDictionaries','SyncBusinessDictionaries','Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','InspectResources','InspectBffActivity','AuditBffSecurity','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation','EnableObservabilityNavigation','DisableObservabilityNavigation')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -33,6 +33,22 @@ if (!$taskToken) { throw 'Authenticated Supabase CLI credential unavailable.' }
 $taskHeaders = @{ Authorization = "Bearer $taskToken" }
 $proRef = 'ckbftoopuyophiebamwy'
 $bffRef = 'bksbwnxdurmuolygiofh'
+if ($Action -eq 'PrepareMemberDirectory') {
+  $taskEnvPath = Join-Path (Get-Location) '.env.local'
+  if (!(Test-Path -LiteralPath $taskEnvPath)) { throw 'Configure the BFF environment first.' }
+  $taskEnvLines = [IO.File]::ReadAllLines($taskEnvPath)
+  if (@($taskEnvLines | Where-Object { $_ -match '^BFF_IDENTITY_DIRECTORY_SERVICE_KEY=.+$' }).Count) {
+    Write-Output 'Server-side member directory already configured.'
+    exit
+  }
+  $taskKeys = Invoke-RestMethod -Uri "https://api.supabase.com/v1/projects/$proRef/api-keys" -Headers $taskHeaders
+  $taskDirectoryKey = ($taskKeys | Where-Object name -eq 'service_role').api_key
+  if (!$taskDirectoryKey) { throw 'Identity directory credential unavailable.' }
+  $taskEnvLines = @($taskEnvLines | Where-Object { ! $_.StartsWith('BFF_IDENTITY_DIRECTORY_SERVICE_KEY=') }) + ('BFF_IDENTITY_DIRECTORY_SERVICE_KEY=' + $taskDirectoryKey)
+  [IO.File]::WriteAllLines($taskEnvPath,$taskEnvLines,[Text.UTF8Encoding]::new($false))
+  Write-Output 'Member directory configured only in ignored server environment; no credentials printed.'
+  exit
+}
 function Read-Utf8JsonResponse($Response) {
   # Windows PowerShell 5 may decode JSON without a response charset as Latin-1.
   # Parse the original UTF-8 bytes so recovery snapshots preserve Chinese data.
@@ -164,6 +180,123 @@ select jsonb_build_object(
 ) as inspection
 '@
   Invoke-BffQuery $taskQuery | ConvertTo-Json -Depth 20
+  exit
+}
+if ($Action -in @('InspectBusinessDictionaries','SyncBusinessDictionaries')) {
+  $taskMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
+  if ($bffRef -ne 'bksbwnxdurmuolygiofh' -or $taskMcp.mcpServers.supabase.url -notmatch 'project_ref=bksbwnxdurmuolygiofh(?:&|$)') {
+    throw 'BFF dictionary project scope mismatch.'
+  }
+  if ($Action -eq 'SyncBusinessDictionaries') {
+    $taskSource = Get-Content -Raw -Encoding UTF8 -LiteralPath 'server/database/schema.sql'
+    $taskBlock = [regex]::Match($taskSource, '(?s)-- BEGIN BFF MODULE DICTIONARIES\r?\n(.*?)-- END BFF MODULE DICTIONARIES')
+    if (!$taskBlock.Success) { throw 'Canonical module dictionary seed is missing.' }
+    $taskSeed = $taskBlock.Groups[1].Value
+    $taskBefore = @(Invoke-BffQuery @'
+select jsonb_build_object(
+  'types',(select coalesce(jsonb_agg(to_jsonb(t)),'[]'::jsonb) from public.bff_dictionary_types t),
+  'items',(select coalesce(jsonb_agg(to_jsonb(i)),'[]'::jsonb) from public.bff_dictionary_items i),
+  'revisions',(select coalesce(jsonb_agg(to_jsonb(r)),'[]'::jsonb) from public.bff_resource_revisions r where resource='dictionaries')
+) as snapshot
+'@)
+    if ($taskBefore.Count -ne 1 -or $null -eq $taskBefore[0].snapshot.types -or $null -eq $taskBefore[0].snapshot.items) {
+      throw 'Dictionary recovery snapshot is invalid.'
+    }
+    $taskBackupDirectory = Join-Path (Get-Location) '.artifacts/database'
+    New-Item -ItemType Directory -Path $taskBackupDirectory -Force | Out-Null
+    $taskBackupPath = Join-Path $taskBackupDirectory ('bff-dictionaries-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '.json')
+    [IO.File]::WriteAllText($taskBackupPath, (@{ project=$bffRef; snapshot=$taskBefore[0].snapshot } | ConvertTo-Json -Depth 50), [Text.Encoding]::UTF8)
+    $taskRecovery = Get-Content -Raw -LiteralPath $taskBackupPath | ConvertFrom-Json
+    if ($taskRecovery.project -ne $bffRef -or @($taskRecovery.snapshot.items).Count -ne @($taskBefore[0].snapshot.items).Count) {
+      throw 'Dictionary recovery snapshot verification failed.'
+    }
+    $taskAssertions = Get-Content -Raw -Encoding UTF8 -LiteralPath 'tests/integration/business-dictionaries.sql'
+    # Validate twice in one rollback transaction to verify idempotency before applying.
+    $null = Invoke-BffQuery ("begin;`n" + $taskSeed + "`n" + $taskSeed + "`n" + $taskAssertions + "`nrollback;")
+    $null = Invoke-BffQuery ("begin;`n" + $taskSeed + "`ncommit;")
+    Invoke-BffQuery ("begin;`n" + $taskAssertions + "`nrollback;") | ConvertTo-Json -Depth 5
+    $taskAfter = @(Invoke-BffQuery 'select id,label,value,status,sort from public.bff_dictionary_items')
+    foreach ($taskOriginal in $taskBefore[0].snapshot.items) {
+      $taskSaved = @($taskAfter | Where-Object { $_.id -eq $taskOriginal.id })
+      if ($taskSaved.Count -ne 1 -or $taskSaved[0].label -ne $taskOriginal.label -or $taskSaved[0].value -ne $taskOriginal.value -or
+        $taskSaved[0].status -ne $taskOriginal.status -or $taskSaved[0].sort -ne $taskOriginal.sort) {
+        throw 'An existing dictionary item changed during seeding. Inspect recovery snapshot.'
+      }
+    }
+    Write-Output 'BFF module dictionaries synchronized; existing labels, values, status and ordering preserved.'
+  }
+  Invoke-BffQuery @'
+select p.code as module,t.code,t.name,count(i.id) as options
+from public.bff_dictionary_types t join public.bff_dictionary_types p on p.id=t.parent_id and p.tenant_id=t.tenant_id
+left join public.bff_dictionary_items i on i.type_id=t.id and i.tenant_id=t.tenant_id
+where p.code in ('BffApplicationManagement','BffMemberManagement','BffUpstreamManagement','BffInterfaceManagement','BffSystemConfiguration')
+group by p.code,t.code,t.name order by p.code,t.code
+'@ | ConvertTo-Json -Depth 5
+  exit
+}
+if ($Action -in @('EnableObservabilityNavigation','DisableObservabilityNavigation')) {
+  if ([string]::IsNullOrWhiteSpace($Login)) { throw 'Provide the existing BFF administrator email.' }
+  foreach ($taskUiPath in @('src/views/calls/index.vue','src/views/alerts/rules/index.vue','src/views/alerts/index.vue')) {
+    if (!(Test-Path -LiteralPath $taskUiPath)) { throw "Install and verify the observability UI: $taskUiPath" }
+  }
+  $taskNavigationValue = if ($Action -eq 'DisableObservabilityNavigation') { 'false' } else { 'true' }
+  $taskHealth = Invoke-RestMethod -Uri ($AppOrigin.TrimEnd('/') + '/api/health')
+  if ($taskHealth.status -ne 'ok' -or ($taskNavigationValue -eq 'true' -and
+    ('calls' -notin $taskHealth.capabilities -or 'alerts' -notin $taskHealth.capabilities))) {
+    throw 'The running BFF host does not declare calls and alerts capabilities.'
+  }
+  $taskAccount = $Login.Trim().Replace("'", "''")
+  $taskNavigationSql = @"
+begin;
+do `$`$
+declare actor public.bff_members; changed integer; observability uuid;
+begin
+  if (select count(*) from public.bff_members where lower(email)=lower('$taskAccount') and enabled and role='admin'
+    and issuer='https://ckbftoopuyophiebamwy.supabase.co/auth/v1')<>1
+  then raise exception 'Exactly one active existing BFF administrator is required'; end if;
+  select * into actor from public.bff_members where lower(email)=lower('$taskAccount') and enabled and role='admin'
+    and issuer='https://ckbftoopuyophiebamwy.supabase.co/auth/v1';
+  perform public.bff_control_lock(actor.id,'System:Menu:Edit','menus');
+  if (with expected(name,parent_name,path,component,type) as (values
+      ('BffObservability',null::text,'/observability','/index/index','folder'),
+      ('BffCalls','BffObservability','/calls','/bff/calls/index','menu'),
+      ('BffAlerts','BffObservability','/alerts','/index/index','folder'),
+      ('BffAlertRules','BffAlerts','/alerts/rules','/bff/alerts/rules/index','menu'),
+      ('BffAlertInstances','BffAlerts','/alerts/instances','/bff/alerts/index','menu'))
+    select count(*) from expected e join public.bff_menus m on m.tenant_id=actor.tenant_id and
+      m.name=e.name and m.path=e.path and m.component=e.component and m.type=e.type and m.builtin
+    left join public.bff_menus p on p.id=m.parent_id and p.tenant_id=actor.tenant_id
+    where (e.parent_name is null and m.parent_id is null) or p.name=e.parent_name)<>5
+  then raise exception 'Reviewed observability navigation entries are missing'; end if;
+  if (with expected(page_name,permission) as (values
+      ('BffCalls','BffCall:View'),
+      ('BffAlertRules','BffAlertRule:View'),
+      ('BffAlertRules','BffAlert:Add'),('BffAlertRules','BffAlert:Edit'),
+      ('BffAlertRules','BffAlert:ChangeStatus'),('BffAlertRules','BffAlert:Archive'),
+      ('BffAlertRules','BffAlert:Evaluate'),
+      ('BffAlertInstances','BffAlert:View'),('BffAlertInstances','BffAlert:Acknowledge'))
+    select count(*) from expected e join public.bff_menus p on p.tenant_id=actor.tenant_id and p.name=e.page_name
+    join public.bff_menus b on b.parent_id=p.id and b.tenant_id=actor.tenant_id and b.name=e.permission
+      and b.type='button' and b.builtin)<>9
+  then raise exception 'Reviewed observability permission entries are missing'; end if;
+  select id into observability from public.bff_menus where tenant_id=actor.tenant_id and name='BffObservability';
+  -- This feature owns its root. Shared BffServiceManagement and its pages are never toggled here.
+  update public.bff_menus set meta=jsonb_set(meta,'{isEnable}','$taskNavigationValue'::jsonb),
+    version=version+1,update_by=actor.id,update_time=now()
+    where tenant_id=actor.tenant_id and builtin and
+      (name in ('BffObservability','BffCalls','BffAlerts','BffAlertRules','BffAlertInstances') or
+        (type='button' and name in ('BffCall:View','BffAlertRule:View','BffAlert:Add',
+          'BffAlert:Edit','BffAlert:ChangeStatus','BffAlert:Archive','BffAlert:Evaluate',
+          'BffAlert:View','BffAlert:Acknowledge')))
+      and meta->'isEnable' is distinct from '$taskNavigationValue'::jsonb;
+  get diagnostics changed=row_count;
+  if changed>0 then perform public.bff_control_advance(actor.id,'menus','menu.capability.enable',observability,
+    jsonb_build_object('capability','observability','enabled','$taskNavigationValue'::boolean,'changed',changed)); end if;
+end `$`$;
+commit;
+"@
+  $null = Invoke-BffQuery $taskNavigationSql
+  Write-Output "Reviewed observability navigation set to $taskNavigationValue for the existing administrator tenant."
   exit
 }
 if ($Action -in @('EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation')) {
@@ -375,7 +508,7 @@ select jsonb_build_object(
     if (@($taskBackup.tables.$taskName).Count -ne [int]$taskDatabaseSnapshot.rowCounts.$taskName) { throw 'BFF recovery row counts do not match.' }
   }
   $taskVerification = ''
-  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql','tests/integration/release-schema.sql','tests/integration/branding-schema.sql','tests/integration/calls-alerts-schema.sql','tests/integration/resources-schema.sql','tests/integration/member-provision.sql','tests/integration/business-dictionaries.sql')) {
+  foreach ($taskVerificationPath in @('tests/integration/business-dictionaries.sql','tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql','tests/integration/release-schema.sql','tests/integration/branding-schema.sql','tests/integration/calls-alerts-schema.sql','tests/integration/resources-schema.sql','tests/integration/member-provision.sql')) {
     if (Test-Path -LiteralPath $taskVerificationPath) {
       $taskVerificationPart = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskVerificationPath
       if ($taskVerificationPart -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }

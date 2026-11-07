@@ -11,11 +11,12 @@
       @retry="load"
     >
       <div class="grid min-w-0 gap-3">
-        <p class="text-sm text-g-700"
-          >管理员可管理本租户全部应用；普通成员只能看到启用且已授权的应用。</p
-        >
-        <div class="h-64 min-w-0">
-          <ArtTable :data="members.rows" :columns="columns" row-key="id" />
+        <div class="rounded-lg bg-g-100 px-3 py-2 text-sm leading-6 text-g-700">
+          <p>管理员默认拥有全部应用的访问权限。</p>
+          <p>普通成员需开启授权，且应用处于启用状态后才可访问。</p>
+        </div>
+        <div class="min-w-0">
+          <ArtTable :data="members.rows" :columns="columns" row-key="id" :max-height="320" />
         </div>
       </div>
     </ArtSectionCard>
@@ -23,6 +24,8 @@
 </template>
 <script setup lang="tsx">
   import { ElSwitch } from 'element-plus'
+  import ArtDictDisplay from '@/components/core/base/art-dict-display/index.vue'
+  import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
   import type { ColumnOption } from '@/types'
   import { fetchApplicationMembers, setApplicationMember, BffApiError } from '@bff/api/bff'
   import type { ApplicationMember, BffApplication } from '@bff/types/bff'
@@ -38,36 +41,54 @@
   const columns: ColumnOption<ApplicationMember>[] = [
     {
       prop: 'name',
-      label: '成员 / 角色',
-      minWidth: 168,
+      label: '成员',
+      minWidth: 84,
       formatter: (row) => (
-        <div class="min-w-0">
-          <div class="flex min-w-0 items-center gap-2">
-            <p class="min-w-0 flex-1 truncate font-medium text-g-900" title={row.name || row.email}>
-              {row.name || row.email}
-            </p>
-            <span class="shrink-0 text-xs text-g-700">
-              {row.role === 'admin' ? '管理员' : '成员'}
-            </span>
-          </div>
-          <p class="truncate text-xs text-g-700" title={row.email}>
+        <div class="min-w-0 py-1">
+          <p class="truncate font-medium leading-6 text-g-900" title={row.name || row.email}>
+            {row.name || row.email}
+          </p>
+          <p class="truncate text-xs leading-5 text-g-700" title={row.email}>
             {row.email}
           </p>
         </div>
       )
     },
     {
+      prop: 'role',
+      label: '平台身份',
+      width: 104,
+      align: 'center',
+      headerAlign: 'center',
+      formatter: (row) => (
+        <ArtDictDisplay dictCode={BFF_DICTIONARIES.members.role} value={row.role} display="tag" />
+      )
+    },
+    {
       prop: 'granted',
       label: '应用访问',
-      width: 104,
+      width: 80,
+      align: 'center',
+      headerAlign: 'center',
       formatter: (row) => (
-        <ElSwitch
-          modelValue={row.role === 'admin' || row.granted}
-          disabled={row.role === 'admin' || !row.enabled}
-          loading={members.saving === row.id}
-          aria-label={`授权 ${row.name || row.email} 访问应用`}
-          onChange={(value) => void change(row, Boolean(value))}
-        />
+        <span
+          class="inline-flex items-center"
+          title={
+            row.role === 'admin'
+              ? '管理员默认拥有访问权限'
+              : !row.enabled
+                ? '该成员已停用，无法调整授权'
+                : '修改后立即生效'
+          }
+        >
+          <ElSwitch
+            modelValue={row.role === 'admin' || row.granted}
+            disabled={row.role === 'admin' || !row.enabled}
+            loading={members.saving === row.id}
+            aria-label={`授权 ${row.name || row.email} 访问应用`}
+            onChange={(value) => void change(row, Boolean(value))}
+          />
+        </span>
       )
     }
   ]

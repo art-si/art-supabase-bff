@@ -4172,4 +4172,123 @@ alter table public.bff_dictionary_items enable row level security;
 revoke all on public.bff_resource_revisions,public.bff_menus,public.bff_roles,public.bff_member_roles,public.bff_role_menus,public.bff_dictionary_types,public.bff_dictionary_items from public,anon,authenticated;
 revoke all on public.bff_resource_revisions,public.bff_menus,public.bff_roles,public.bff_member_roles,public.bff_role_menus,public.bff_dictionary_types,public.bff_dictionary_items from service_role;
 grant select,insert,update,delete on public.bff_resource_revisions,public.bff_menus,public.bff_roles,public.bff_member_roles,public.bff_role_menus,public.bff_dictionary_types,public.bff_dictionary_items to service_role;
+-- BEGIN BFF MODULE DICTIONARIES
+-- Protocol values are immutable built-ins. Labels, order and presentation remain configurable.
+do $bff_module_dictionaries$
+declare actor record; entry record; option record; parent uuid; dictionary uuid; affected integer; changed integer;
+begin
+  for actor in select distinct on (tenant_id) id,tenant_id from public.bff_members
+    where enabled and role='admin' order by tenant_id,created_at,id loop
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||actor.tenant_id::text,0));
+    changed:=0;
+    for entry in select * from (values
+      ('BffCommon','通用配置'),
+      ('BffApplicationManagement','应用管理'),
+      ('BffMemberManagement','成员管理'),
+      ('BffUpstreamManagement','上游服务'),
+      ('BffInterfaceManagement','接口编排'),
+      ('BffSystemConfiguration','系统配置')
+    ) as directories(code,name) loop
+      insert into public.bff_dictionary_types(tenant_id,node_type,name,code,builtin,create_by,update_by)
+        select actor.tenant_id,'directory',entry.name,entry.code,true,actor.id,actor.id
+        where not exists(select 1 from public.bff_dictionary_types
+          where tenant_id=actor.tenant_id and node_type='directory' and code=entry.code);
+      get diagnostics affected=row_count; changed:=changed+affected;
+    end loop;
+    for entry in select * from (values
+      ('commonBoolean','是否','BffCommon'),
+      ('bffRuntimeEnvironment','运行环境','BffCommon'),
+      ('sysWebsiteLanguage','网站语言','BffSystemConfiguration'),
+      ('sysCaptchaProvider','登录验证方式','BffSystemConfiguration'),
+      ('sysTurnstileSize','验证控件尺寸','BffSystemConfiguration'),
+      ('sysTurnstileTheme','验证控件主题','BffSystemConfiguration'),
+      ('sysWatermarkContentType','水印内容','BffSystemConfiguration'),
+      ('bffApplicationStatus','应用状态','BffApplicationManagement'),
+      ('bffMemberAccessStatus','成员访问状态','BffMemberManagement'),
+      ('bffMemberRole','平台身份','BffMemberManagement'),
+      ('bffUpstreamStatus','上游运行状态','BffUpstreamManagement'),
+      ('bffUpstreamAuthType','上游认证方式','BffUpstreamManagement'),
+      ('bffCredentialAction','凭据操作','BffUpstreamManagement'),
+      ('bffInterfaceMethod','接口请求方法','BffInterfaceManagement'),
+      ('bffInterfaceValidationStatus','接口验证状态','BffInterfaceManagement'),
+      ('bffInterfaceInputLocation','接口输入位置','BffInterfaceManagement'),
+      ('bffInterfaceValueType','接口字段类型','BffInterfaceManagement'),
+      ('bffInterfaceBindingSource','接口映射来源','BffInterfaceManagement')
+    ) as types(code,name,directory) loop
+      select id into parent from public.bff_dictionary_types
+        where tenant_id=actor.tenant_id and node_type='directory' and code=entry.directory;
+      insert into public.bff_dictionary_types(tenant_id,parent_id,node_type,name,code,builtin,create_by,update_by)
+        values(actor.tenant_id,parent,'dictionary',entry.name,entry.code,true,actor.id,actor.id)
+        on conflict (tenant_id,code) where node_type='dictionary' do nothing;
+      get diagnostics affected=row_count; changed:=changed+affected;
+    end loop;
+    for option in select * from (values
+      ('commonBoolean','true','是',1,'success'),('commonBoolean','false','否',2,'info'),
+      ('bffRuntimeEnvironment','development','开发环境',1,'info'),
+      ('bffRuntimeEnvironment','staging','预发布环境',2,'warning'),
+      ('bffRuntimeEnvironment','production','生产环境',3,'success'),
+      ('sysWebsiteLanguage','zh','简体中文',1,'info'),('sysWebsiteLanguage','en','English',2,'info'),
+      ('sysCaptchaProvider','turnstile','Cloudflare Turnstile',1,'info'),
+      ('sysTurnstileSize','normal','标准',1,'info'),('sysTurnstileSize','compact','紧凑',2,'info'),
+      ('sysTurnstileSize','flexible','自适应',3,'info'),('sysTurnstileSize','hidden','隐藏',4,'info'),
+      ('sysTurnstileTheme','auto','跟随系统',1,'info'),('sysTurnstileTheme','light','浅色',2,'info'),
+      ('sysTurnstileTheme','dark','深色',3,'info'),
+      ('sysWatermarkContentType','username','当前用户',1,'info'),
+      ('sysWatermarkContentType','username_time','用户与时间',2,'info'),
+      ('sysWatermarkContentType','site_name','系统名称',3,'primary'),
+      ('sysWatermarkContentType','custom','自定义内容',4,'warning'),
+      ('bffApplicationStatus','true','启用',1,'success'),
+      ('bffApplicationStatus','false','停用',2,'info'),
+      ('bffMemberAccessStatus','enabled','已启用',1,'success'),
+      ('bffMemberAccessStatus','disabled','已停用',2,'info'),
+      ('bffMemberRole','viewer','普通成员',1,'info'),
+      ('bffMemberRole','admin','平台管理员',2,'primary'),
+      ('bffUpstreamStatus','draft','草稿',1,'info'),
+      ('bffUpstreamStatus','active','已启用',2,'success'),
+      ('bffUpstreamStatus','disabled','已停用',3,'warning'),
+      ('bffUpstreamAuthType','none','无认证',1,'info'),
+      ('bffUpstreamAuthType','bearer','Bearer Token',2,'primary'),
+      ('bffUpstreamAuthType','api_key_header','API Key 请求头',3,'warning'),
+      ('bffCredentialAction','rotate','轮换凭据',1,'primary'),
+      ('bffCredentialAction','clear','清除凭据',2,'danger'),
+      ('bffInterfaceMethod','GET','GET',1,'info'),
+      ('bffInterfaceMethod','POST','POST',2,'info'),
+      ('bffInterfaceMethod','PUT','PUT',3,'info'),
+      ('bffInterfaceMethod','PATCH','PATCH',4,'info'),
+      ('bffInterfaceMethod','DELETE','DELETE',5,'info'),
+      ('bffInterfaceValidationStatus','unvalidated','待验证',1,'info'),
+      ('bffInterfaceValidationStatus','valid','已通过',2,'success'),
+      ('bffInterfaceValidationStatus','invalid','未通过',3,'danger'),
+      ('bffInterfaceInputLocation','path','路径参数',1,'info'),
+      ('bffInterfaceInputLocation','query','查询参数',2,'info'),
+      ('bffInterfaceInputLocation','body','请求体',3,'info'),
+      ('bffInterfaceValueType','string','文本',1,'info'),
+      ('bffInterfaceValueType','number','数字',2,'info'),
+      ('bffInterfaceValueType','boolean','布尔值',3,'info'),
+      ('bffInterfaceBindingSource','input','接口输入',1,'primary'),
+      ('bffInterfaceBindingSource','step','前序步骤',2,'success'),
+      ('bffInterfaceBindingSource','literal','固定值',3,'info')
+    ) as options(code,value,label,sort,tag) loop
+      select id into dictionary from public.bff_dictionary_types
+        where tenant_id=actor.tenant_id and node_type='dictionary' and code=option.code;
+      insert into public.bff_dictionary_items(tenant_id,type_id,label,value,sort,tag_type,builtin,create_by,update_by)
+        values(actor.tenant_id,dictionary,option.label,option.value,option.sort,option.tag,true,actor.id,actor.id)
+        on conflict (tenant_id,type_id,value) do nothing;
+      get diagnostics affected=row_count; changed:=changed+affected;
+    end loop;
+    select id into parent from public.bff_dictionary_types
+      where tenant_id=actor.tenant_id and node_type='directory' and code='BffSystemConfiguration';
+    update public.bff_dictionary_types t set parent_id=parent,version=version+1,update_by=actor.id,update_time=now()
+      where t.tenant_id=actor.tenant_id and t.node_type='dictionary'
+        and t.code in ('sysWatermarkContentType','sysWebsiteLanguage','sysCaptchaProvider','sysTurnstileSize','sysTurnstileTheme')
+        and exists(select 1 from public.bff_dictionary_types p
+          where p.id=t.parent_id and p.tenant_id=t.tenant_id and p.code='BffCommon');
+    get diagnostics affected=row_count; changed:=changed+affected;
+    if changed>0 then
+      perform public.bff_control_advance(actor.id,'dictionaries','dictionary.module_seed',null,
+        jsonb_build_object('changed',changed));
+    end if;
+  end loop;
+end $bff_module_dictionaries$;
+-- END BFF MODULE DICTIONARIES
 commit;
