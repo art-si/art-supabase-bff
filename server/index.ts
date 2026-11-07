@@ -51,11 +51,26 @@ import {
 } from './releases'
 import { handleGateway } from './gateway'
 import { brandingDto, readBranding, writeBranding } from './branding'
+import {
+  acknowledgeAlert,
+  alertDetail,
+  alertOptions,
+  callDetail,
+  callOptions,
+  changeAlertRuleStatus,
+  evaluateAlertRule,
+  listAlertRules,
+  listAlerts,
+  listCalls,
+  writeAlertRule
+} from './observability'
+import { startAlertWorker } from './alert-worker'
 import TreeUtils from 'art-supabase-pro/src/utils/tree.ts'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 
 let vite: import('vite').ViteDevServer | undefined
 let viteReady: Promise<import('vite').ViteDevServer> | undefined
+let stopAlertWorker: (() => void) | undefined
 
 export async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
   res.setHeader('X-Content-Type-Options', 'nosniff')
@@ -75,7 +90,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       json(res, {
         status: 'ok',
         authenticationConfigured: authReady(),
-        capabilities: ['upstreams', 'interfaces', 'branding', 'releases']
+        capabilities: ['upstreams', 'interfaces', 'branding', 'releases', 'calls', 'alerts']
       })
       return
     }
@@ -155,6 +170,70 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       }
       if (req.method === 'POST') {
         json(res, await writeBranding(req, session))
+        return
+      }
+    }
+    if (url.pathname === '/api/calls/options' && req.method === 'GET') {
+      json(res, await callOptions(session))
+      return
+    }
+    if (url.pathname === '/api/calls' && req.method === 'GET') {
+      json(res, await listCalls(session, url))
+      return
+    }
+    const callResource = /^\/api\/calls\/([^/]+)$/.exec(url.pathname)
+    if (callResource && req.method === 'GET') {
+      json(res, await callDetail(session, callResource[1]))
+      return
+    }
+    if (url.pathname === '/api/alerts/options' && req.method === 'GET') {
+      json(res, await alertOptions(session))
+      return
+    }
+    if (url.pathname === '/api/alerts/rules') {
+      if (req.method === 'GET') {
+        json(res, await listAlertRules(session, url))
+        return
+      }
+      if (req.method === 'POST') {
+        json(res, await writeAlertRule(req, session, 'create'), 201)
+        return
+      }
+    }
+    const alertRuleResource =
+      /^\/api\/alerts\/rules\/([^/]+)(?:\/(status|archive|evaluate))?$/.exec(url.pathname)
+    if (alertRuleResource) {
+      const [, id, action] = alertRuleResource
+      if (!action && req.method === 'PUT') {
+        json(res, await writeAlertRule(req, session, 'update', id))
+        return
+      }
+      if (action === 'status' && req.method === 'POST') {
+        json(res, await changeAlertRuleStatus(req, session, id))
+        return
+      }
+      if (action === 'archive' && req.method === 'POST') {
+        json(res, await writeAlertRule(req, session, 'archive', id))
+        return
+      }
+      if (action === 'evaluate' && req.method === 'POST') {
+        json(res, await evaluateAlertRule(req, session, id))
+        return
+      }
+    }
+    if (url.pathname === '/api/alerts' && req.method === 'GET') {
+      json(res, await listAlerts(session, url))
+      return
+    }
+    const alertResource = /^\/api\/alerts\/([^/]+)(?:\/(ack))?$/.exec(url.pathname)
+    if (alertResource) {
+      const [, id, action] = alertResource
+      if (!action && req.method === 'GET') {
+        json(res, await alertDetail(session, id))
+        return
+      }
+      if (action === 'ack' && req.method === 'POST') {
+        json(res, await acknowledgeAlert(req, session, id))
         return
       }
     }
@@ -485,6 +564,7 @@ try {
   server.listen(config.port, '127.0.0.1')
   await listening
   console.log(`BFF platform: ${config.origin}`)
+  stopAlertWorker = startAlertWorker()
   if (!config.production) {
     console.log('[BFF] 认证服务已就绪，正在准备前端开发服务…')
     viteReady = import('vite').then(({ createServer }) =>
@@ -494,6 +574,8 @@ try {
     console.log(`[BFF] 前端已就绪 (${((performance.now() - started) / 1000).toFixed(1)}s)`)
   }
 } catch (error) {
+  stopAlertWorker?.()
+  stopAlertWorker = undefined
   if (server.listening) server.close()
   await vite?.close()
   if (error instanceof Error && 'code' in error && error.code === 'EADDRINUSE') {
@@ -509,6 +591,8 @@ try {
 }
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.on(signal, () => {
+    stopAlertWorker?.()
+    stopAlertWorker = undefined
     server.close()
     void vite?.close()
   })

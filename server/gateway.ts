@@ -606,11 +606,14 @@ export async function handleGateway(
         p_steps: executionResult.steps.map((step) => ({
           key: step.key,
           status: step.status,
+          code: step.code,
+          errorClass: step.errorClass,
           statusCode: step.statusCode,
           durationMs: step.durationMs
         })),
         p_result_payload: passed ? sealGatewayReplay(session, execution, gatewayResponse) : null,
-        p_upstream_versions: [...observations.values()]
+        p_upstream_versions: [...observations.values()],
+        p_error_class: passed ? null : (executionResult.errorClass ?? 'unknown')
       })
       .abortSignal(AbortSignal.timeout(10_000))
     rpcFailure(finished.error)

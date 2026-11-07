@@ -192,6 +192,8 @@ alter table public.bff_interface_release_events disable trigger bff_interface_re
 delete from public.bff_sessions where member_id=any($taskMemberSql);
 delete from public.bff_platform_settings where tenant_id=any($taskTenantSql);
 delete from public.bff_audit_events where tenant_id=any($taskTenantSql);
+delete from public.bff_alert_instances where tenant_id=any($taskTenantSql);
+delete from public.bff_alert_rules where tenant_id=any($taskTenantSql);
 delete from public.bff_interface_calls where tenant_id=any($taskTenantSql);
 delete from public.bff_interface_release_events where tenant_id=any($taskTenantSql);
 delete from public.bff_interface_deployments where tenant_id=any($taskTenantSql);
@@ -296,7 +298,7 @@ select jsonb_build_object(
     if (@($taskBackup.tables.$taskName).Count -ne [int]$taskDatabaseSnapshot.rowCounts.$taskName) { throw 'BFF recovery row counts do not match.' }
   }
   $taskVerification = ''
-  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql','tests/integration/release-schema.sql','tests/integration/branding-schema.sql')) {
+  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql','tests/integration/release-schema.sql','tests/integration/branding-schema.sql','tests/integration/calls-alerts-schema.sql')) {
     if (Test-Path -LiteralPath $taskVerificationPath) {
       $taskVerificationPart = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskVerificationPath
       if ($taskVerificationPart -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }

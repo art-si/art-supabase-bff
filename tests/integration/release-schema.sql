@@ -44,7 +44,7 @@ begin
     has_function_privilege('authenticated',
       'public.bff_gateway_step_targets(uuid,uuid,uuid,integer,text[])','execute') or
     has_function_privilege('anon',
-      'public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text,jsonb)','execute')
+      'public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text,jsonb,text)','execute')
   then raise exception 'Browser can invoke release or gateway RPC'; end if;
   if to_regprocedure('public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text)') is not null
   then raise exception 'Legacy gateway finish without observations remains callable'; end if;
@@ -92,6 +92,19 @@ begin
     'currentConfigVersion',1,'credentialVersion',0));
   perform public.bff_record_interface_validation(admin_a,interface_a,1,'[]'::jsonb);
   perform public.bff_record_interface_test(admin_a,interface_a,1,true,tested);
+  result:=public.bff_release_prepare_snapshot(admin_a,interface_a,'publish');
+  if result->'snapshot'->>'applicationId'<>app_a.id::text or
+    result->>'validatedVersion'<>'1' or result->'lastTestUpstreams'<>tested or
+    result->>'routeConflict'<>'false' or result->'targets'->0->>'readinessCode'<>'ready' or
+    result->'targets'->0->>'baseUrl'<>'https://release.example.test'
+  then raise exception 'Atomic private publish snapshot was incomplete'; end if;
+  begin
+    perform public.bff_release_prepare_snapshot(admin_b,interface_a,'publish');
+    raise exception 'Cross tenant private snapshot accessible';
+  exception when raise_exception then if sqlerrm<>'BFF_NOT_FOUND' then raise; end if; end;
+  if has_function_privilege('authenticated',
+    'public.bff_release_prepare_snapshot(uuid,uuid,text,uuid)','execute')
+  then raise exception 'Browser can fetch private release snapshot'; end if;
   begin
     perform public.bff_write_release(admin_a,'publish',interface_a,1,0,null,'  ',observed);
     raise exception 'Blank release notes accepted';
@@ -213,6 +226,12 @@ begin
   then raise exception 'Gateway finish cached stale upstream result'; end if;
   observed:=jsonb_build_array(jsonb_build_object('id',service_a,'configVersion',1,
     'currentConfigVersion',2,'credentialVersion',0));
+  result:=public.bff_release_prepare_snapshot(admin_a,interface_a,'rollback',version_one);
+  if result->'targets'->0->>'configVersion'<>'1' or
+    result->'targets'->0->>'currentConfigVersion'<>'2' or
+    result->'targets'->0->>'baseUrl'<>'https://release.example.test' or
+    result->'targets'->0->>'readinessCode'<>'ready'
+  then raise exception 'Historical pin snapshot did not preserve the published revision'; end if;
   begin
     perform public.bff_write_release(admin_a,'rollback',interface_a,null,2,version_one,'Stale upstream',
       jsonb_build_array(jsonb_build_object('id',service_a,'configVersion',1,
@@ -252,6 +271,8 @@ begin
   perform public.bff_record_interface_validation(admin_a,interface_b,1,'[]'::jsonb);
   perform public.bff_record_interface_test(admin_a,interface_b,1,true,
     jsonb_build_array(jsonb_build_object('id',service_a,'configVersion',2,'credentialVersion',0)));
+  result:=public.bff_release_prepare_snapshot(admin_a,interface_b,'publish');
+  if result->>'routeConflict'<>'true' then raise exception 'Private snapshot missed route conflict'; end if;
   begin
     perform public.bff_write_release(admin_a,'publish',interface_b,1,0,null,'Collision',
       jsonb_build_array(jsonb_build_object('id',service_a,'configVersion',2,
@@ -278,6 +299,10 @@ begin
     jsonb_build_array(jsonb_build_object('id',service_b,'configVersion',1,
       'currentConfigVersion',1,'credentialVersion',1)));
   version_secure:=(history->'versions'->0->>'id')::uuid;
+  result:=public.bff_release_prepare_snapshot(admin_a,interface_c,'enable');
+  if result->'targets'->0->>'readinessCode'<>'ready' or
+    result->'targets'->0->'credential'->>'ciphertext'<>'fixture-only-encrypted-value'
+  then raise exception 'Private snapshot did not return ready encrypted credential'; end if;
   result:=public.bff_gateway_step_targets(admin_a,interface_c,version_secure,1,array['load']);
   if jsonb_array_length(result)<>1 or
     result->0->'credential'->>'ciphertext'<>'fixture-only-encrypted-value' or
@@ -289,6 +314,10 @@ begin
     pg_catalog.strpos(public.bff_read_releases(admin_a,'{}'::jsonb)::text,'fixture-only-encrypted-value')>0
   then raise exception 'Private encrypted credential leaked to public release DTO'; end if;
   perform public.bff_write_upstream(admin_a,'status',service_b,2,'{"status":"disabled"}'::jsonb,null);
+  result:=public.bff_release_prepare_snapshot(admin_a,interface_c,'enable');
+  if result->'targets'->0->>'readinessCode'<>'inactive' or
+    result->'targets'->0->'credential'<>'null'::jsonb
+  then raise exception 'Inactive snapshot exposed credential or wrong readiness'; end if;
   begin
     perform public.bff_gateway_step_targets(admin_a,interface_c,version_secure,1,array['load']);
     raise exception 'Disabled upstream still returned private gateway target';

@@ -1,4 +1,5 @@
 import type { IncomingMessage } from 'node:http'
+import { uniq } from 'lodash-es'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 import type { InterfaceWriteInput } from '../src/types/interface'
 import type {
@@ -23,7 +24,7 @@ import {
   interfacePath,
   validateInterfaceDefinition
 } from './interface-definition'
-import { loadPublishedTarget, type ReleaseUpstreamObservation } from './published-runtime'
+import { decodePublishedTarget, type ReleaseUpstreamObservation } from './published-runtime'
 
 type ReleaseOperation = 'publish' | 'rollback' | 'enable' | 'disable'
 type ReadinessPurpose = Exclude<ReleaseOperation, 'disable'>
@@ -321,47 +322,35 @@ async function prepareRelease(
   purpose: ReadinessPurpose,
   targetVersionId?: string
 ): Promise<PreparedRelease> {
-  const record = await target(session, id, permissions[purpose])
-  let snapshot: InterfaceWriteInput
-  let lastTestUpstreams: unknown = []
-  let validatedVersion: unknown = null
-  if (purpose === 'publish') {
-    const result = await database
-      .from('bff_interfaces')
-      .select(
-        'application_id,environment,code,name,description,method,path,definition,version,validated_version,last_test_upstreams'
-      )
-      .eq('id', record.interfaceId)
-      .eq('tenant_id', session.member.tenant_id)
-      .eq('application_id', record.applicationId)
-      .is('deleted_at', null)
-      .maybeSingle()
-    failure(result.error)
-    const row = object(result.data)
-    if (row.version !== record.draftVersion)
-      throw new HttpError(409, '接口草稿已变化，请刷新后重新检查')
-    snapshot = interfaceInput({
-      applicationId: row.application_id,
-      environment: row.environment,
-      code: row.code,
-      name: row.name,
-      description: row.description,
-      method: row.method,
-      path: row.path,
-      definition: row.definition
-    })
-    lastTestUpstreams = row.last_test_upstreams
-    validatedVersion = row.validated_version
-  } else {
-    const result = await database.rpc('bff_release_snapshot', {
+  // One authorized database snapshot keeps all readiness checks on the same revision.
+  const result = await database.rpc(
+    'bff_release_prepare_snapshot',
+    {
       p_actor: session.member.id,
-      p_interface: record.interfaceId,
-      p_version_id: targetVersionId ? uuid(targetVersionId) : null,
-      p_permission: permissions[purpose]
-    })
-    failure(result.error)
-    snapshot = interfaceInput(object(result.data))
-  }
+      p_interface: uuid(id),
+      p_purpose: purpose,
+      p_version_id: targetVersionId ? uuid(targetVersionId) : null
+    },
+    { get: true }
+  )
+  failure(result.error)
+  const prepared = object(result.data)
+  const record = releaseRecordDto(prepared.record)
+  const snapshot = interfaceInput(object(prepared.snapshot))
+  if (
+    record.interfaceId !== uuid(id).toLowerCase() ||
+    record.applicationId !== snapshot.applicationId ||
+    record.environment !== snapshot.environment ||
+    typeof prepared.routeConflict !== 'boolean' ||
+    !Array.isArray(prepared.targets) ||
+    prepared.targets.length !== snapshot.definition.steps.length
+  )
+    throw new HttpError(503, '发布检查数据暂不可用，请稍后重试')
+  const targets = prepared.targets.map(object)
+  if (uniq(targets.map((item) => item.stepKey)).length !== targets.length)
+    throw new HttpError(503, '发布检查数据暂不可用，请稍后重试')
+  const lastTestUpstreams: unknown = prepared.lastTestUpstreams
+  const validatedVersion = prepared.validatedVersion
   const checks: ReleaseReadiness['checks'] = []
   const add = (key: string, label: string, passed: boolean, message: string): void => {
     checks.push({ key, label, passed, message })
@@ -406,17 +395,32 @@ async function prepareRelease(
       record.deployment?.enabled ? '接口已启用' : '存在可重新启用的发布版本'
     )
   const observed = new Map<string, ReleaseUpstreamObservation>()
-  const started = Date.now()
   for (const step of snapshot.definition.steps) {
     if (issues.length || !record.application.enabled) {
       add(`upstream:${step.key}`, step.name, false, '请先完成应用与定义检查')
       continue
     }
     try {
-      const loaded = await loadPublishedTarget(session.member, snapshot, step, {
-        requireCurrentConfig: purpose === 'publish',
-        remainingMs: Math.max(1, 30_000 - (Date.now() - started))
-      })
+      const value = targets.find((item) => item.stepKey === step.key)
+      if (!value) throw new HttpError(503, '发布目标暂不可用，请稍后重试')
+      const unavailable: Record<string, string> = {
+        missing: '绑定的上游服务已移除，请调整接口定义',
+        inactive: '绑定的上游服务尚未启用或已归档',
+        incompatible: '上游配置或凭据策略已变化，请调整后重新测试',
+        credential_missing: '请先配置有效的服务端凭据'
+      }
+      if (value.readinessCode !== 'ready') {
+        const message =
+          typeof value.readinessCode === 'string' ? unavailable[value.readinessCode] : undefined
+        throw new HttpError(message ? 409 : 503, message || '上游检查暂未完成，请稍后重试')
+      }
+      const loaded = decodePublishedTarget(
+        session.member,
+        snapshot,
+        step,
+        value,
+        purpose === 'publish'
+      )
       const previous = observed.get(loaded.observed.id)
       if (
         previous &&
@@ -457,23 +461,11 @@ async function prepareRelease(
       tested ? '测试使用的配置与凭据版本仍有效' : '缺少有效测试记录，或配置与凭据已变化，请重新测试'
     )
   }
-  const deploymentResult = await database
-    .from('bff_interface_deployments')
-    .select('interface_id')
-    .eq('tenant_id', session.member.tenant_id)
-    .eq('application_id', record.applicationId)
-    .eq('environment', record.environment)
-    .eq('enabled', true)
-    .eq('method', snapshot.method)
-    .eq('route_shape', snapshot.path.replace(/\{[A-Za-z][A-Za-z0-9_]*\}/g, '{}'))
-    .neq('interface_id', record.interfaceId)
-    .limit(1)
-  failure(deploymentResult.error)
   add(
     'route',
     '入口路径',
-    !deploymentResult.data?.length,
-    deploymentResult.data?.length ? '该方法与路径已有其他生效接口' : '当前路径没有生效接口冲突'
+    !prepared.routeConflict,
+    prepared.routeConflict ? '该方法与路径已有其他生效接口' : '当前路径没有生效接口冲突'
   )
   return {
     record,

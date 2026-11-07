@@ -30,6 +30,13 @@ export function resolveBffOrigin(
   return target.origin
 }
 const origin = resolveBffOrigin(env.BFF_ORIGIN, production, port)
+const alertWorkerIntervalMs = Number(env.BFF_ALERT_WORKER_INTERVAL_MS || 60_000)
+if (
+  !Number.isSafeInteger(alertWorkerIntervalMs) ||
+  alertWorkerIntervalMs < 30_000 ||
+  alertWorkerIntervalMs > 900_000
+)
+  throw new Error('BFF_ALERT_WORKER_INTERVAL_MS 必须在 30000–900000 毫秒之间')
 export const config = {
   port,
   origin,
@@ -48,6 +55,7 @@ export const config = {
   upstreamAllowedCidrs: env.BFF_UPSTREAM_ALLOWED_CIDRS || '',
   upstreamAllowLocalHttp: env.BFF_UPSTREAM_ALLOW_LOCAL_HTTP === 'true',
   interfaceTestWriteOrigins: env.BFF_INTERFACE_TEST_WRITE_ORIGINS || '',
+  alertWorkerIntervalMs,
   production
 }
 

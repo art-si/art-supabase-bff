@@ -117,8 +117,13 @@ export interface InterfaceTestStep {
   status: 'passed' | 'failed' | 'skipped'
   statusCode: number | null
   durationMs: number
+  code: string | null
+  errorClass: InterfaceErrorClass | null
   message: string
 }
+
+export type InterfaceErrorClass =
+  'timeout' | 'upstream' | 'unknown' | 'authorization' | 'validation' | 'rate_limited'
 
 export interface InterfaceTestResult {
   interfaceId: string
@@ -128,5 +133,6 @@ export interface InterfaceTestResult {
   output: Record<string, InterfaceScalar>
   steps: InterfaceTestStep[]
   durationMs: number
+  errorClass: InterfaceErrorClass | null
   message: string
 }

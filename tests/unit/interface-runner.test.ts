@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import test from 'node:test'
-import { runInterface } from '../../server/interface-runner'
+import {
+  classifyExecutionCode,
+  classifyExecutionError,
+  runInterface
+} from '../../server/interface-runner'
 import type { InterfaceStepTarget } from '../../server/interface-runner'
 import { HttpError } from '../../server/http'
 import { interfaceRecordFixture, stepBinding } from '../fixtures/interface-definition'
@@ -95,6 +99,8 @@ test('upstream failures stop following requests and credential echoes cannot esc
     failed.definition.steps[0].pathParams = []
     const result = await runInterface(failed, { orderId: 'A' }, loader, { policy })
     assert.equal(result.passed, false)
+    assert.equal(result.errorClass, 'upstream')
+    assert.equal(result.steps[0].code, 'upstream_error')
     assert.equal(calls, 1)
     assert.equal(result.steps[1].status, 'skipped')
     assert.ok(!JSON.stringify(result).includes('private-provider-body'))
@@ -120,4 +126,15 @@ test('upstream failures stop following requests and credential echoes cannot esc
     server.close()
     await once(server, 'close')
   }
+})
+
+test('stable network and HTTP codes determine error categories without inspecting messages', () => {
+  assert.equal(classifyExecutionCode('timeout'), 'timeout')
+  assert.equal(classifyExecutionCode('upstream_error', 401), 'authorization')
+  assert.equal(classifyExecutionCode('upstream_error', 429), 'rate_limited')
+  assert.equal(classifyExecutionCode('upstream_error', 422), 'validation')
+  assert.equal(classifyExecutionCode('upstream_error', 503), 'upstream')
+  assert.equal(classifyExecutionCode('dns_failed'), 'unknown')
+  assert.equal(classifyExecutionError(new HttpError(504, 'arbitrary')), 'timeout')
+  assert.equal(classifyExecutionError(new HttpError(409, 'arbitrary', 'RESULT_UNKNOWN')), 'unknown')
 })
