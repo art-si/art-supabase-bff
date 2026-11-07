@@ -45,7 +45,7 @@ export interface BffResourceList {
 /** Matches the shared deletion guard's stable fields without importing browser APIs. */
 export interface BffResourceReference {
   resourceId: string
-  dependencyCode: string
+  dependencyCode: 'logoUrl' | 'faviconUrl' | 'wordmarkLightUrl' | 'wordmarkDarkUrl'
   recordId: string
   targetId: string
   recordNo: string

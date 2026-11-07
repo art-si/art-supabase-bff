@@ -402,11 +402,14 @@ test('publish V1 and V2, inspect snapshots, rollback V1, disable and enable with
     await expect(dialog).toBeVisible()
     await dialog.getByPlaceholder('写明变更原因、影响范围和回退依据').fill(notes)
     await dialog.getByRole('button', { name: `确认${title.replace('接口', '')}` }).click()
-    if (title === '停用接口' || title === '启用接口')
-      await page
-        .getByRole('button', { name: `确认${title.replace('接口', '')}` })
+    if (title === '停用接口' || title === '启用接口') {
+      const dialogs = page.getByRole('dialog', { name: title })
+      await expect(dialogs).toHaveCount(2)
+      await dialogs
         .last()
+        .getByRole('button', { name: `确认${title.replace('接口', '')}` })
         .click()
+    }
     await expect(dialog).toHaveCount(0)
   }
   await row().getByRole('button', { name: '发布草稿' }).click()

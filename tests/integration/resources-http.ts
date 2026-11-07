@@ -40,7 +40,7 @@ async function request(
 ): Promise<{ status: number; data: unknown; headers: Headers }> {
   const response = await fetch(`${origin}${route}`, {
     method,
-    signal: AbortSignal.timeout(25_000),
+    signal: AbortSignal.timeout(60_000),
     headers: {
       Cookie: `bff_session=${tokens[index]}`,
       Origin: origin,
@@ -70,7 +70,25 @@ async function upload(
 ): Promise<BffResource> {
   const form = new FormData()
   form.set('file', new File([Uint8Array.from(bytes)], name, { type: mime }))
-  const result = await request(index, '/api/resources/upload', 'POST', form)
+  const startedAt = Date.now()
+  let result: Awaited<ReturnType<typeof request>>
+  try {
+    result = await request(index, '/api/resources/upload', 'POST', form)
+  } catch (error) {
+    console.error('Isolated resource upload transport failed', {
+      mime,
+      sizeByte: bytes.length,
+      elapsedMs: Date.now() - startedAt,
+      kind: error instanceof Error ? error.name : 'UnknownError'
+    })
+    throw error
+  }
+  console.log('Isolated resource upload response', {
+    mime,
+    sizeByte: bytes.length,
+    elapsedMs: Date.now() - startedAt,
+    status: result.status
+  })
   assert.equal(result.status, 201, JSON.stringify(result.data))
   const item = resourceDto(result.data)
   assert.ok(Number.isSafeInteger(item.id))
@@ -205,12 +223,25 @@ try {
   assert.equal(branding.status, 200)
   const brandSaved = await request(0, '/api/control/branding', 'POST', {
     version: row(branding.data).version,
-    config: { ...BFF_BRANDING_DEFAULTS, logoUrl: first.url, faviconUrl: second.url }
+    config: {
+      ...BFF_BRANDING_DEFAULTS,
+      logoUrl: first.url,
+      faviconUrl: second.url,
+      wordmarkImageEnabled: true,
+      wordmarkLightUrl: first.url,
+      wordmarkDarkUrl: first.url
+    }
   })
   assert.equal(brandSaved.status, 200)
   const refs = await request(0, '/api/resources/references', 'POST', { ids: [first.id, second.id] })
   assert.equal(refs.status, 200)
-  assert.ok(Array.isArray(refs.data) && refs.data.length === 2)
+  assert.ok(Array.isArray(refs.data) && refs.data.length === 4)
+  assert.deepEqual(refs.data.map((item: unknown) => row(item).dependencyCode).sort(), [
+    'faviconUrl',
+    'logoUrl',
+    'wordmarkDarkUrl',
+    'wordmarkLightUrl'
+  ])
   assert.equal(
     (await request(0, `/api/resources/${first.id}`, 'DELETE', { version: first.version })).status,
     409
@@ -233,6 +264,22 @@ try {
   })
   assert.equal(deleted.status, 200)
   assert.equal((await request(0, `/api/resources/${second.id}/content`)).status, 404)
+  const brandWithoutImages = await request(0, '/api/control/branding', 'POST', {
+    version: row(brandWithoutIcon.data).version,
+    config: {
+      ...BFF_BRANDING_DEFAULTS,
+      logoUrl: '',
+      faviconUrl: '',
+      wordmarkImageEnabled: false,
+      wordmarkLightUrl: '',
+      wordmarkDarkUrl: ''
+    }
+  })
+  assert.equal(brandWithoutImages.status, 200)
+  assert.equal(
+    (await request(0, `/api/resources/${first.id}`, 'DELETE', { version: first.version })).status,
+    200
+  )
   const begun = await checked(
     database.rpc('bff_resource_delete_begin', {
       p_actor: members[2],
@@ -256,7 +303,7 @@ try {
   assert.ifError(cleaned.error)
   assert.equal(cleaned.data?.status, 'deleted')
   console.log(
-    'Resource HTTP checks passed: PNG and ICO, CRUD/CAS, two brand deletion guards, tenant isolation, CSRF, private content, cleanup.'
+    'Resource HTTP checks passed: PNG and ICO, CRUD/CAS, four brand reference guards, tenant isolation, CSRF, private content, cleanup.'
   )
 } finally {
   await cleanup()

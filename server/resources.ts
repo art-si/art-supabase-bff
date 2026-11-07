@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import { MIMEType } from 'node:util'
+import { createClient } from '@supabase/supabase-js'
 import { uniq } from 'lodash-es'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 import { mapWithConcurrency } from 'art-supabase-pro/src/utils/async.ts'
@@ -14,12 +15,36 @@ import {
 import { requireMutation, type Session } from './auth'
 import { text } from './control-plane'
 import { database } from './database/client'
+import { config } from './config'
 import { body, HttpError } from './http'
 import { uuid } from './applications'
 
 const bucket = 'bff-assets'
 const maxFileBytes = 10 * 1024 * 1024
 const maxMultipartBytes = maxFileBytes + 64 * 1024
+const contentReadTimeoutMs = 30_000
+/** A bounded GET-only Storage client gives private downloads their own content budget. */
+const contentStorage = createClient(
+  config.databaseUrl || 'http://localhost',
+  config.databaseKey || 'not-configured',
+  {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      fetch: (input, init) => {
+        const method = (
+          init?.method || (input instanceof Request ? input.method : 'GET')
+        ).toUpperCase()
+        if (method !== 'GET') throw new Error('Resource content transport only supports GET')
+        const upstream = init?.signal || (input instanceof Request ? input.signal : undefined)
+        const timeout = AbortSignal.timeout(contentReadTimeoutMs)
+        return fetch(input, {
+          ...init,
+          signal: upstream ? AbortSignal.any([upstream, timeout]) : timeout
+        })
+      }
+    }
+  }
+).storage
 const tokenPattern = /^[0-9a-f]{64}$/
 const safeInline = new Set([
   'image/png',
@@ -383,7 +408,10 @@ export async function resourceReferences(
       !ids.includes(resourceId) ||
       row.targetId !== resourceId ||
       row.recordId !== session.member.tenant_id ||
-      (row.dependencyCode !== 'logoUrl' && row.dependencyCode !== 'faviconUrl') ||
+      (row.dependencyCode !== 'logoUrl' &&
+        row.dependencyCode !== 'faviconUrl' &&
+        row.dependencyCode !== 'wordmarkLightUrl' &&
+        row.dependencyCode !== 'wordmarkDarkUrl') ||
       row.cleanupAllowed !== false
     )
       throw new Error('Invalid resource reference')
@@ -459,18 +487,36 @@ export async function serveResource(
   resourceId: string
 ): Promise<void> {
   if (req.method !== 'GET') throw new HttpError(405, '资源请求方式无效')
-  const result = await database.rpc(
-    'bff_resource_content',
-    { p_actor: session.member.id, p_id: id(resourceId) },
-    { get: true }
-  )
-  failure(result.error)
-  const row = object(result.data)
-  const resource = claimContent(row, session.member.tenant_id)
-  const downloaded = await database.storage.from(bucket).download(resource.objectKey)
-  if (downloaded.error || !downloaded.data) throw new HttpError(503, '资源暂时无法读取，请稍后重试')
-  if (downloaded.data.size !== resource.sizeByte)
-    throw new HttpError(503, '资源内容尚未就绪，请稍后重试')
+  let resource: ReturnType<typeof claimContent>
+  let content: Blob
+  let stage = 'lookup'
+  try {
+    const result = await database.rpc(
+      'bff_resource_content',
+      { p_actor: session.member.id, p_id: id(resourceId) },
+      { get: true }
+    )
+    failure(result.error)
+    stage = 'claim'
+    resource = claimContent(object(result.data), session.member.tenant_id)
+    stage = 'storage'
+    const downloaded = await contentStorage.from(bucket).download(resource.objectKey)
+    if (downloaded.error || !downloaded.data)
+      throw new HttpError(503, '资源暂时无法读取，请稍后重试', 'RESOURCE_UNAVAILABLE')
+    stage = 'verify'
+    if (downloaded.data.size !== resource.sizeByte)
+      throw new HttpError(503, '资源内容尚未就绪，请稍后重试', 'RESOURCE_UNAVAILABLE')
+    content = downloaded.data
+  } catch (error) {
+    if (error instanceof HttpError) throw error
+    console.error('[BFF] 资源读取失败', {
+      stage,
+      kind: error instanceof Error ? error.name : 'UnknownError'
+    })
+    throw new HttpError(503, '资源暂时无法读取，请稍后重试', 'RESOURCE_UNAVAILABLE', {
+      cause: error
+    })
+  }
   const filename = encodeURIComponent(resource.originName).replace(
     /['()*]/g,
     (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`
@@ -483,7 +529,7 @@ export async function serveResource(
     'Cross-Origin-Resource-Policy': 'same-origin',
     'Cache-Control': 'private, no-store'
   })
-  Readable.fromWeb(downloaded.data.stream())
+  Readable.fromWeb(content.stream())
     .on('error', () => res.destroy())
     .pipe(res)
 }

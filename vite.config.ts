@@ -4,11 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { defineConfig, loadEnv, type AliasOptions } from 'vite'
 
 const applicationRoot = fileURLToPath(new URL('.', import.meta.url))
-// Explicit override supports joint development; normal installs always use the npm package.
-const platformRoot = realpathSync(
-  process.env.ART_SUPABASE_PLATFORM_ROOT ||
-    path.join(applicationRoot, 'node_modules/art-supabase-pro')
-)
+const platformRoot = realpathSync(path.join(applicationRoot, 'node_modules/art-supabase-pro'))
 if (process.argv.includes('--typecheck')) {
   const { typecheckModule } = await import(
     pathToFileURL(path.join(platformRoot, 'scripts/module-typecheck.mjs')).href
