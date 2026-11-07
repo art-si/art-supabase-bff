@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import * as oidc from 'openid-client'
 import { config, authReady } from './config'
-import { identityFetch, oidcIdentityFetch } from './identity-http'
+import { oidcIdentityFetch } from './identity-http'
+import { remoteFetch } from './remote-http'
 import { database, requireData } from './database/client'
 import { cookie, setCookie, redirect, HttpError } from './http'
 import {
@@ -47,6 +48,13 @@ export interface Session {
   tokens: Tokens
 }
 let provider: Promise<oidc.Configuration> | undefined
+function loginStartFailure(code: string, cause?: unknown): never {
+  console.error('[bff] OAuth start failed', {
+    stage: code,
+    kind: cause instanceof Error ? cause.name : 'UnknownError'
+  })
+  throw new HttpError(503, '统一登录暂时无法发起，请稍后重试', code, { cause })
+}
 function getProvider(): Promise<oidc.Configuration> {
   if (!authReady())
     throw new HttpError(503, '统一登录尚未配置完成，请联系平台管理员', 'AUTH_NOT_CONFIGURED')
@@ -92,7 +100,8 @@ export async function startLogin(
   url: URL
 ): Promise<void> {
   const forceLogin = url.searchParams.get('force_login') === '1'
-  if (!forceLogin) {
+  const restart = url.searchParams.get('restart') === '1'
+  if (!forceLogin && !restart) {
     try {
       await authenticate(req)
       redirect(res, safeReturnPath(url.searchParams.get('returnTo')))
@@ -101,7 +110,13 @@ export async function startLogin(
       if (!(error instanceof HttpError) || error.status !== 401) throw error
     }
   }
-  const settings = await getProvider()
+  let settings: oidc.Configuration
+  try {
+    settings = await getProvider()
+  } catch (error) {
+    if (error instanceof HttpError) throw error
+    loginStartFailure('AUTH_DISCOVERY_UNAVAILABLE', error)
+  }
   const verifier = oidc.randomPKCECodeVerifier(),
     state = oidc.randomState(),
     browser = opaqueToken()
@@ -119,32 +134,46 @@ export async function startLogin(
   })
   // Supabase's headless authorize endpoint does not use browser login cookies.
   // Resolve its redirect on the server; authentication and consent still run at pro.
-  const authorization = await identityFetch(authorizationUrl, {
-    redirect: 'manual',
-    signal: AbortSignal.timeout(15000)
-  })
+  let authorization: Response
+  try {
+    authorization = await remoteFetch(authorizationUrl, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15000)
+    })
+  } catch (error) {
+    loginStartFailure('AUTH_AUTHORIZE_TRANSPORT', error)
+  }
   const location = authorization.headers.get('location')
   if (![302, 303].includes(authorization.status) || !location) {
-    throw new HttpError(502, '统一登录暂时无法发起，请稍后重试')
+    loginStartFailure('AUTH_AUTHORIZE_RESPONSE')
   }
-  const loginUrl = resolveAuthorizationLoginRedirect(
-    location,
-    config.authorizationUi,
-    forceLogin,
-    url.searchParams.get('reason') || ''
-  )
-  requireData(
-    await database
-      .from('bff_auth_transactions')
-      .insert({
-        state_hash: digest(state),
-        browser_hash: digest(browser),
-        payload: seal(transaction, config.sessionKey),
-        expires_at: new Date(Date.now() + 600000).toISOString()
-      })
-      .select('state_hash')
-      .single()
-  )
+  let loginUrl: string
+  try {
+    loginUrl = resolveAuthorizationLoginRedirect(
+      location,
+      config.authorizationUi,
+      forceLogin,
+      url.searchParams.get('reason') || ''
+    )
+  } catch (error) {
+    loginStartFailure('AUTH_AUTHORIZE_REDIRECT', error)
+  }
+  try {
+    requireData(
+      await database
+        .from('bff_auth_transactions')
+        .insert({
+          state_hash: digest(state),
+          browser_hash: digest(browser),
+          payload: seal(transaction, config.sessionKey),
+          expires_at: new Date(Date.now() + 600000).toISOString()
+        })
+        .select('state_hash')
+        .single()
+    )
+  } catch (error) {
+    loginStartFailure('AUTH_TRANSACTION_SAVE', error)
+  }
   setCookie(res, 'bff_login', browser, 600)
   redirect(res, loginUrl)
 }

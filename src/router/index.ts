@@ -93,7 +93,10 @@ export function initRouter(app: App<Element>): void {
       if (to.path === '/') return menuStore.getHomePath()
       return true
     } catch {
-      return { path: '/auth/login', query: { error: 'service_unavailable' } }
+      window.location.replace(
+        '/api/auth/login?' + new URLSearchParams({ returnTo: to.fullPath, restart: '1' })
+      )
+      return false
     }
   })
   setupAfterEachGuard(router)

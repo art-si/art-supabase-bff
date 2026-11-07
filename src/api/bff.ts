@@ -48,9 +48,6 @@ export async function signOut(): Promise<void> {
   await call('/api/auth/logout', { method: 'POST', body: '{}' })
   bffSession.value = null
 }
-export async function getAuthStatus(): Promise<{ authenticationConfigured: boolean }> {
-  return call('/api/health')
-}
 export function fetchApplications(query: {
   current: number
   size: number

@@ -320,7 +320,7 @@ const server = createServer((req, res) => {
   const pageUrl = new URL(req.url || '/', config.origin)
   if (req.method === 'GET' && (pageUrl.pathname === '/' || pageUrl.pathname === '/auth/login')) {
     const error = pageUrl.searchParams.get('error')
-    if (error === 'access_denied' || !error) {
+    if (error === 'access_denied' || error === 'service_unavailable' || !error) {
       const query = new URLSearchParams({
         returnTo: safeReturnPath(pageUrl.searchParams.get('returnTo'))
       })
@@ -328,6 +328,7 @@ const server = createServer((req, res) => {
         query.set('force_login', '1')
         query.set('reason', error)
       }
+      if (error === 'service_unavailable') query.set('restart', '1')
       if (pageUrl.searchParams.get('signed_out') === '1') query.set('force_login', '1')
       redirect(res, `/api/auth/login?${query}`)
       return
