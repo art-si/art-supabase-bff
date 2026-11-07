@@ -40,6 +40,7 @@ export default defineConfig(async ({ mode }) => {
     ...[
       'system-manage',
       'data-center',
+      'attachments',
       'unique-field',
       'master-data-delete',
       'table-column-config',

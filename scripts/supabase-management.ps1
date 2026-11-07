@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation')][string]$Action = 'Inspect',
+  [ValidateSet('Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','InspectResources','InspectBffActivity','AuditBffSecurity','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -89,19 +89,96 @@ function Invoke-BffQuery([string]$Query) {
   $taskResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json; charset=utf-8' -Body $taskBody
   return (Read-Utf8JsonResponse $taskResponse)
 }
-if ($Action -in @('EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation')) {
+if ($Action -eq 'InspectBffActivity') {
+  $taskMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
+  if ($taskMcp.mcpServers.supabase.url -notmatch 'project_ref=bksbwnxdurmuolygiofh(?:&|$)') { throw 'BFF project scope mismatch.' }
+  $taskActivityQuery = @'
+select pid,state,wait_event_type,wait_event,
+  greatest(0,extract(epoch from now()-query_start)::integer) as age_seconds,
+  pg_blocking_pids(pid) as blocking_pids,application_name,backend_type
+from pg_stat_activity
+where datname=current_database() and pid<>pg_backend_pid() and state is distinct from 'idle'
+order by query_start nulls last,pid limit 50
+'@
+  Invoke-BffQuery $taskActivityQuery | ConvertTo-Json -Depth 8
+  exit
+}
+if ($Action -eq 'AuditBffSecurity') {
+  $taskMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
+  if ($taskMcp.mcpServers.supabase.url -notmatch 'project_ref=bksbwnxdurmuolygiofh(?:&|$)') { throw 'BFF project scope mismatch.' }
+  $taskResponse = Invoke-WebRequest -UseBasicParsing -Method Get -Uri "https://api.supabase.com/v1/projects/$bffRef/advisors/security" -Headers $taskHeaders
+  $taskAudit = Read-Utf8JsonResponse $taskResponse
+  $taskAuditDir = Join-Path (Get-Location) '.artifacts/database'
+  New-Item -ItemType Directory -Path $taskAuditDir -Force | Out-Null
+  $taskAuditPath = Join-Path $taskAuditDir ('advisors-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '.json')
+  [IO.File]::WriteAllText($taskAuditPath,([Text.Encoding]::UTF8.GetString($taskResponse.RawContentStream.ToArray())),[Text.Encoding]::UTF8)
+  $taskFindings = if ($taskAudit -is [array]) { @($taskAudit) }
+    elseif ($taskAudit.PSObject.Properties['lints']) { @($taskAudit.lints) }
+    elseif ($taskAudit.PSObject.Properties['advisors']) { @($taskAudit.advisors) }
+    elseif ($taskAudit.PSObject.Properties['data']) { @($taskAudit.data) }
+    else { throw 'Unexpected security advisor response; full response saved for local review.' }
+  $taskCounts = @($taskFindings | Group-Object { [string]$_.level + ' / ' + [string]$_.name } |
+    Sort-Object Name | ForEach-Object { [PSCustomObject]@{ levelAndName=$_.Name; count=$_.Count } })
+  $taskResourceFindings = @($taskFindings | Where-Object {
+    ($_ | ConvertTo-Json -Depth 20 -Compress) -match '(?i)bff_resources|bff-assets|bff_resource|storage[.]objects|storage[.]buckets'
+  })
+  $taskResourceWarnings = @($taskResourceFindings | Where-Object { $_.level -in @('WARN','ERROR') })
+  [PSCustomObject]@{
+    project = $bffRef
+    savedTo = $taskAuditPath
+    findingCount = $taskFindings.Count
+    byLevelAndName = $taskCounts
+    resourceFindingCount = $taskResourceFindings.Count
+    resourceFindingNames = @($taskResourceFindings | ForEach-Object { [string]$_.name } | Sort-Object -Unique)
+    resourceWarningCount = $taskResourceWarnings.Count
+    resourceConclusion = if ($taskResourceWarnings.Count -eq 0) { 'No resource-related WARN or ERROR findings' } else { 'Review resource-related WARN or ERROR findings in saved report' }
+    warningEntities = @($taskFindings | Where-Object { $_.level -in @('WARN','ERROR') } |
+      ForEach-Object { [string]$_.metadata.schema + '.' + [string]$_.metadata.name } | Sort-Object -Unique)
+  } | ConvertTo-Json -Depth 8
+  exit
+}
+if ($Action -eq 'InspectResources') {
+  $taskMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
+  if ($taskMcp.mcpServers.supabase.url -notmatch 'project_ref=bksbwnxdurmuolygiofh(?:&|$)') { throw 'BFF project scope mismatch.' }
+  $taskQuery = @'
+select jsonb_build_object(
+  'servicePrivileges',jsonb_build_object(
+    'bucketSelect',has_table_privilege('service_role','storage.buckets','SELECT'),
+    'objectSelect',has_table_privilege('service_role','storage.objects','SELECT'),
+    'resourceInsert',has_table_privilege('service_role','public.bff_resources','INSERT'),
+    'revisionWrite',has_table_privilege('service_role','public.bff_resource_revisions','INSERT,UPDATE'),
+    'reserveExecute',has_function_privilege('service_role',
+      'public.bff_resource_reserve(uuid,text,text,text,bigint,text)','EXECUTE')),
+  'sequence',jsonb_build_object(
+    'name',pg_get_serial_sequence('public.bff_resources','id'),
+    'serviceUsage',has_sequence_privilege('service_role',pg_get_serial_sequence('public.bff_resources','id'),'USAGE'),
+    'serviceSelect',has_sequence_privilege('service_role',pg_get_serial_sequence('public.bff_resources','id'),'SELECT'),
+    'anonUsage',has_sequence_privilege('anon',pg_get_serial_sequence('public.bff_resources','id'),'USAGE'),
+    'authenticatedUsage',has_sequence_privilege('authenticated',pg_get_serial_sequence('public.bff_resources','id'),'USAGE')),
+  'bucket',(select jsonb_build_object('private',not public,'fileSizeLimit',file_size_limit,
+    'allowedMimeTypes',allowed_mime_types) from storage.buckets where id='bff-assets'),
+  'objectPolicyCount',(select count(*) from pg_policies where schemaname='storage' and tablename='objects'),
+  'storagePolicies',(select coalesce(jsonb_agg(jsonb_build_object('table',tablename,'name',policyname,
+    'cmd',cmd,'roles',roles,'using',qual,'check',with_check) order by tablename,policyname),'[]'::jsonb)
+    from pg_policies where schemaname='storage' and tablename in ('objects','buckets'))
+) as inspection
+'@
+  Invoke-BffQuery $taskQuery | ConvertTo-Json -Depth 20
+  exit
+}
+if ($Action -in @('EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation')) {
   if ([string]::IsNullOrWhiteSpace($Login)) { throw 'Provide the existing BFF administrator email.' }
-  $taskCapability = switch ($Action) { { $_ -in @('EnableReleaseNavigation','DisableReleaseNavigation') } { 'releases' }; { $_ -in @('EnableBrandingNavigation','DisableBrandingNavigation') } { 'branding' }; 'EnableInterfaceNavigation' { 'interfaces' }; default { 'upstreams' } }
+  $taskCapability = switch ($Action) { { $_ -in @('EnableReleaseNavigation','DisableReleaseNavigation') } { 'releases' }; { $_ -in @('EnableBrandingNavigation','DisableBrandingNavigation') } { 'branding' }; { $_ -in @('EnableResourceNavigation','DisableResourceNavigation') } { 'resources' }; 'EnableInterfaceNavigation' { 'interfaces' }; default { 'upstreams' } }
   $taskNavigationValue = if ($Action.StartsWith('Disable')) { 'false' } else { 'true' }
-  $taskPageName = switch ($taskCapability) { 'branding' { 'BffBranding' }; 'releases' { 'BffReleases' }; 'interfaces' { 'BffInterfaces' }; default { 'BffUpstreams' } }
-  $taskPermissionPrefix = switch ($taskCapability) { 'branding' { 'BffBrand' }; 'releases' { 'BffRelease' }; 'interfaces' { 'BffInterface' }; default { 'BffUpstream' } }
-  $taskActions = switch ($taskCapability) { 'branding' { @('View','Edit') }; 'releases' { @('View','Publish','Rollback','ChangeStatus') }; 'interfaces' { @('View','Add','Edit','Validate','Test','TestWrite','Delete') }; default { @('View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete') } }
-  $taskParentName = if ($taskCapability -eq 'branding') { 'BffSystem' } else { 'BffServiceManagement' }
-  $taskParentPath = if ($taskCapability -eq 'branding') { '/system' } else { '/services' }
-  $taskPagePath = if ($taskCapability -eq 'branding') { '/system/website-config' } else { "/$taskCapability" }
-  $taskComponent = if ($taskCapability -eq 'branding') { '/shared/system/website-config' } else { "/bff/$taskCapability/index" }
+  $taskPageName = switch ($taskCapability) { 'branding' { 'BffBranding' }; 'resources' { 'BffResources' }; 'releases' { 'BffReleases' }; 'interfaces' { 'BffInterfaces' }; default { 'BffUpstreams' } }
+  $taskPermissionPrefix = switch ($taskCapability) { 'branding' { 'BffBrand' }; 'resources' { 'BffResource' }; 'releases' { 'BffRelease' }; 'interfaces' { 'BffInterface' }; default { 'BffUpstream' } }
+  $taskActions = switch ($taskCapability) { 'branding' { @('View','Edit') }; 'resources' { @('View','Add','Edit','Delete') }; 'releases' { @('View','Publish','Rollback','ChangeStatus') }; 'interfaces' { @('View','Add','Edit','Validate','Test','TestWrite','Delete') }; default { @('View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete') } }
+  $taskParentName = switch ($taskCapability) { 'branding' { 'BffSystem' }; 'resources' { 'BffDataCenter' }; default { 'BffServiceManagement' } }
+  $taskParentPath = switch ($taskCapability) { 'branding' { '/system' }; 'resources' { '/data-center' }; default { '/services' } }
+  $taskPagePath = switch ($taskCapability) { 'branding' { '/system/website-config' }; 'resources' { '/data-center/attachment' }; default { "/$taskCapability" } }
+  $taskComponent = switch ($taskCapability) { 'branding' { '/shared/system/website-config' }; 'resources' { '/shared/data-center/attachment' }; default { "/bff/$taskCapability/index" } }
   $taskPermissionSql = ($taskActions | ForEach-Object { "'$($taskPermissionPrefix):$_'" }) -join ','
-  $taskUiPath = if ($taskCapability -eq 'branding') { 'node_modules/art-supabase-pro/src/views/system/website-config/index.vue' } else { "src/views/$taskCapability/index.vue" }
+  $taskUiPath = switch ($taskCapability) { 'branding' { 'node_modules/art-supabase-pro/src/views/system/website-config/index.vue' }; 'resources' { 'node_modules/art-supabase-pro/src/views/data-center/attachment/index.vue' }; default { "src/views/$taskCapability/index.vue" } }
   if (!(Test-Path -LiteralPath $taskUiPath)) { throw 'Install and verify the capability UI before enabling navigation.' }
   $taskHealth = Invoke-RestMethod -Uri ($AppOrigin.TrimEnd('/') + '/api/health')
   if ($taskHealth.status -ne 'ok' -or ($taskNavigationValue -eq 'true' -and $taskCapability -notin $taskHealth.capabilities)) { throw 'The running BFF host does not declare this capability.' }
@@ -298,7 +375,7 @@ select jsonb_build_object(
     if (@($taskBackup.tables.$taskName).Count -ne [int]$taskDatabaseSnapshot.rowCounts.$taskName) { throw 'BFF recovery row counts do not match.' }
   }
   $taskVerification = ''
-  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql','tests/integration/release-schema.sql','tests/integration/branding-schema.sql','tests/integration/calls-alerts-schema.sql')) {
+  foreach ($taskVerificationPath in @('tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql','tests/integration/release-schema.sql','tests/integration/branding-schema.sql','tests/integration/calls-alerts-schema.sql','tests/integration/resources-schema.sql')) {
     if (Test-Path -LiteralPath $taskVerificationPath) {
       $taskVerificationPart = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskVerificationPath
       if ($taskVerificationPart -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }

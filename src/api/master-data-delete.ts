@@ -18,8 +18,11 @@ export function fetchMasterDataDeleteDependencies(
   resourceType: MasterDataDeleteResourceType,
   ids: string[]
 ): Promise<MasterDataDeleteDependencyDetail[]> {
-  return call('/api/control/references', {
-    method: 'POST',
-    body: JSON.stringify({ resourceType, ids })
-  })
+  return call(
+    resourceType === 'attachment' ? '/api/resources/references' : '/api/control/references',
+    {
+      method: 'POST',
+      body: JSON.stringify({ resourceType, ids })
+    }
+  )
 }

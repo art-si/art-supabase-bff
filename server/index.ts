@@ -65,12 +65,23 @@ import {
   writeAlertRule
 } from './observability'
 import { startAlertWorker } from './alert-worker'
+import {
+  listResources,
+  uploadResource,
+  renameResource,
+  deleteResource,
+  resourceReferences,
+  resourceDisplayNames,
+  serveResource,
+  startResourceCleanup
+} from './resources'
 import TreeUtils from 'art-supabase-pro/src/utils/tree.ts'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 
 let vite: import('vite').ViteDevServer | undefined
 let viteReady: Promise<import('vite').ViteDevServer> | undefined
 let stopAlertWorker: (() => void) | undefined
+let stopResourceCleanup: (() => void) | undefined
 
 export async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
   res.setHeader('X-Content-Type-Options', 'nosniff')
@@ -90,7 +101,15 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       json(res, {
         status: 'ok',
         authenticationConfigured: authReady(),
-        capabilities: ['upstreams', 'interfaces', 'branding', 'releases', 'calls', 'alerts']
+        capabilities: [
+          'upstreams',
+          'interfaces',
+          'branding',
+          'resources',
+          'releases',
+          'calls',
+          'alerts'
+        ]
       })
       return
     }
@@ -150,14 +169,61 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
                     ...node,
                     props: {
                       profile: 'branding',
-                      canEdit: permissions.includes('BffBrand:Edit')
+                      canEdit: permissions.includes('BffBrand:Edit'),
+                      resourceTenantId: session.member.tenant_id,
+                      resourceCanView: permissions.includes('BffResource:View'),
+                      resourceCanUpload: permissions.includes('BffResource:Add'),
+                      resourceCanEdit: permissions.includes('BffResource:Edit'),
+                      resourceCanDelete: permissions.includes('BffResource:Delete')
                     }
                   }
-                : node
+                : node.component === '/shared/data-center/attachment'
+                  ? {
+                      ...node,
+                      props: {
+                        title: '资源管理',
+                        canView: permissions.includes('BffResource:View'),
+                        canUpload: permissions.includes('BffResource:Add'),
+                        canRename: permissions.includes('BffResource:Edit'),
+                        canDelete: permissions.includes('BffResource:Delete')
+                      }
+                    }
+                  : node
           )
         )
       })
       return
+    }
+    if (url.pathname === '/api/resources' && req.method === 'GET') {
+      json(res, await listResources(session, url))
+      return
+    }
+    if (url.pathname === '/api/resources/upload' && req.method === 'POST') {
+      json(res, await uploadResource(req, session), 201)
+      return
+    }
+    if (url.pathname === '/api/resources/names' && req.method === 'GET') {
+      json(res, await resourceDisplayNames(session, url))
+      return
+    }
+    if (url.pathname === '/api/resources/references' && req.method === 'POST') {
+      json(res, await resourceReferences(req, session))
+      return
+    }
+    const resource = /^\/api\/resources\/([^/]+)(?:\/(name|content))?$/.exec(url.pathname)
+    if (resource) {
+      if (resource[2] === 'content' && req.method === 'GET') {
+        await serveResource(req, res, session, resource[1])
+        return
+      }
+      if (resource[2] === 'name' && req.method === 'PUT') {
+        json(res, await renameResource(req, session, resource[1]))
+        return
+      }
+      if (!resource[2] && req.method === 'DELETE') {
+        json(res, await deleteResource(req, session, resource[1]))
+        return
+      }
     }
     if (url.pathname === '/api/control/menus' && req.method === 'GET') {
       json(res, await readMenus(session, url.searchParams.get('catalog') === '1'))
@@ -563,6 +629,7 @@ try {
   const listening = once(server, 'listening')
   server.listen(config.port, '127.0.0.1')
   await listening
+  stopResourceCleanup = startResourceCleanup()
   console.log(`BFF platform: ${config.origin}`)
   stopAlertWorker = startAlertWorker()
   if (!config.production) {
@@ -576,6 +643,8 @@ try {
 } catch (error) {
   stopAlertWorker?.()
   stopAlertWorker = undefined
+  stopResourceCleanup?.()
+  stopResourceCleanup = undefined
   if (server.listening) server.close()
   await vite?.close()
   if (error instanceof Error && 'code' in error && error.code === 'EADDRINUSE') {
@@ -593,6 +662,8 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.on(signal, () => {
     stopAlertWorker?.()
     stopAlertWorker = undefined
+    stopResourceCleanup?.()
+    stopResourceCleanup = undefined
     server.close()
     void vite?.close()
   })
