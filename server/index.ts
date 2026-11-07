@@ -25,6 +25,7 @@ import {
 } from './control-plane'
 import { database } from './database/client'
 import { readRoles, writeRole, roleAssignments, readMembers, writeMember } from './access-control'
+import { provisionMember } from './member-provision'
 import {
   listUpstreams,
   upstreamOptions,
@@ -431,6 +432,10 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
           roleResource[2] === 'menus' ? 'menus' : 'users'
         )
       )
+      return
+    }
+    if (url.pathname === '/api/control/members/provision' && req.method === 'POST') {
+      json(res, await provisionMember(req, session))
       return
     }
     if (

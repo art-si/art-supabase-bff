@@ -14,7 +14,8 @@ export function controlFailure(error: { code?: string; message?: string } | null
     BFF_BUILTIN_PROTECTED: [409, '系统预置的访问入口和权限标识需要保留'],
     BFF_REFERENCED: [409, '记录仍被引用，请处理关联记录后重试'],
     BFF_SELF_LOCKOUT: [409, '不能停用自己或降低自己的管理员身份'],
-    BFF_LAST_ADMIN: [409, '工作空间至少需要保留一名启用的管理员']
+    BFF_LAST_ADMIN: [409, '工作空间至少需要保留一名启用的管理员'],
+    BFF_MEMBER_EXISTS: [409, '该统一账号已开通 BFF 访问，不能重复或跨工作空间开通']
   }
   const known =
     error.message && Object.hasOwn(failures, error.message) ? failures[error.message] : undefined

@@ -1402,6 +1402,30 @@ begin
       from public.bff_members m where m.tenant_id=tenant),'[]'::jsonb));
 end $$;
 
+create or replace function public.bff_provision_member(p_actor uuid,p_identity jsonb,p_revision bigint)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; revision bigint; member_id uuid;
+begin
+  revision:=public.bff_control_lock(p_actor,'System:Member:Add','members');
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or actor.role<>'admin' then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_revision is distinct from revision then raise exception 'BFF_CONFLICT'; end if;
+  if (p_identity->>'tenantId')::uuid is distinct from actor.tenant_id or
+    p_identity->>'issuer' is distinct from actor.issuer or
+    nullif(trim(p_identity->>'subject'),'') is null or
+    nullif(trim(p_identity->>'email'),'') is null then raise exception 'BFF_INVALID_IDENTITY'; end if;
+  if exists(select 1 from public.bff_members where issuer=p_identity->>'issuer' and subject=p_identity->>'subject')
+    then raise exception 'BFF_MEMBER_EXISTS'; end if;
+  insert into public.bff_members(issuer,subject,tenant_id,display_name,email,role,updated_by)
+    values(p_identity->>'issuer',p_identity->>'subject',actor.tenant_id,coalesce(p_identity->>'displayName',''),p_identity->>'email','viewer',p_actor)
+    returning id into member_id;
+  revision:=public.bff_control_advance(p_actor,'members','member.provision',member_id,jsonb_build_object('role','viewer','identityTenantId',p_identity->>'identityTenantId'));
+  return public.bff_read_members(p_actor);
+end $$;
+revoke all on function public.bff_provision_member(uuid,jsonb,bigint) from public,anon,authenticated;
+grant execute on function public.bff_provision_member(uuid,jsonb,bigint) to service_role;
+
+
 create or replace function public.bff_write_member(p_actor uuid,p_definition jsonb,p_revision bigint)
 returns jsonb language plpgsql security invoker set search_path='' as $$
 declare tenant uuid; actor_admin boolean; revision bigint; target public.bff_members; target_role text:=p_definition->>'role'; target_enabled boolean:=(p_definition->>'enabled')::boolean;
@@ -1578,7 +1602,7 @@ begin
         when entry.name='BffAlertRules' then array['View','Add','Edit','ChangeStatus','Archive','Evaluate']
         when entry.name='BffAlertInstances' then array['View','Acknowledge']
         when entry.mark='System:Role' then array['View','Add','Edit','Delete','AssignPermission','AssignUser']
-        when entry.mark='System:Member' then array['View','Edit'] else array['View','Add','Edit','Delete'] end loop
+        when entry.mark='System:Member' then array['View','Add','Edit'] else array['View','Add','Edit','Delete'] end loop
         insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
           values(actor.tenant_id,page,case when entry.name='BffAlertRules' and action='View' then 'BffAlertRule:View' else entry.mark||':'||action end,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then '新增' when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Archive' then '归档' when 'Acknowledge' then '确认告警' when 'Evaluate' then '立即评估' when 'Publish' then '发布版本' when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
             'isEnable',entry.mark not in ('BffInterface','BffRelease','BffBrand','BffCall','BffAlert','BffResource')),true,actor.id,actor.id)

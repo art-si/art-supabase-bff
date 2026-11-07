@@ -139,3 +139,52 @@ test('member keyword search can reach empty state and recover', async ({ page })
   await expect(page.getByRole('row').filter({ hasText: '验收示例：接口观察员' })).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: '验收示例：服务维护员' })).toBeVisible()
 })
+
+test('administrator provisions an existing identity with inline retry feedback', async ({
+  page
+}) => {
+  await page.route('**/api/auth/session', (route) =>
+    route.fulfill({
+      json: { ...session, permissions: [...session.permissions, 'System:Member:Add'] }
+    })
+  )
+  let opened = false
+  let fail = true
+  const added = {
+    ...members[0],
+    id: '66666666-6666-4666-8666-666666666666',
+    displayName: '新开通成员',
+    email: 'new@example.test'
+  }
+  await page.route('**/api/control/members', (route) =>
+    route.fulfill({
+      json: { revision: opened ? 2 : 1, records: opened ? [...members, added] : members }
+    })
+  )
+  await page.route('**/api/control/members/provision', async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ email: 'new@example.test', revision: 1 })
+    expect(route.request().headers()['x-csrf-token']).toBe(session.csrfToken)
+    if (fail) {
+      fail = false
+      await route.fulfill({
+        status: 400,
+        json: { message: '未找到唯一的有效统一账号，请核对邮箱' }
+      })
+      return
+    }
+    opened = true
+    await route.fulfill({ json: { revision: 2, records: [...members, added] } })
+  })
+  await page.goto('/system/member')
+  await page.getByRole('button', { name: '开通成员', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText('开通 BFF 平台访问')).toBeVisible()
+  await dialog.getByRole('button', { name: '核验并开通' }).click()
+  await expect(dialog.getByText('请输入完整的统一账号邮箱')).toBeVisible()
+  await dialog.getByPlaceholder('请输入已注册的账号邮箱').fill('new@example.test')
+  await dialog.getByRole('button', { name: '核验并开通' }).click()
+  await expect(dialog.getByText('未找到唯一的有效统一账号，请核对邮箱')).toBeVisible()
+  await dialog.getByRole('button', { name: '核验并开通' }).click()
+  await expect(dialog).not.toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: '新开通成员' })).toBeVisible()
+})
