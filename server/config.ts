@@ -1,8 +1,22 @@
-import { loadEnv } from 'vite'
+import { existsSync, readFileSync } from 'node:fs'
+import path from 'node:path'
+import { parse } from 'dotenv'
+import { expand } from 'dotenv-expand'
 
 const production = process.env.NODE_ENV === 'production' || process.argv.includes('--production')
+const mode = production ? 'production' : 'development'
+const parsed: Record<string, string> = Object.assign(
+  {},
+  ...['.env', '.env.local', `.env.${mode}`, `.env.${mode}.local`]
+    .map((file) => path.resolve(file))
+    .filter(existsSync)
+    .map((file) => parse(readFileSync(file)))
+)
+const inherited = Object.fromEntries(
+  Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
+)
 const env = {
-  ...loadEnv(production ? 'production' : 'development', process.cwd(), ''),
+  ...expand({ parsed, processEnv: { ...parsed, ...inherited } }).parsed,
   ...process.env
 }
 const port = Number(env.BFF_PORT || env.PORT || 3010)
