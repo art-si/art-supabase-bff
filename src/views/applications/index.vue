@@ -13,10 +13,11 @@
     >
       <template #actions><BusinessTableWorkspaceActions :table="tableQueryRef" /></template>
     </BusinessWorkspaceHeader>
-    <div class="application-page__workspace business-workspace-content flex min-w-0 flex-col">
+    <div class="application-page__workspace business-workspace-content min-h-0 flex-1">
       <ArtTableQuery
         ref="tableQueryRef"
         v-model="table.search"
+        class="h-full"
         focusable
         focus-scope-selector=".application-page__workspace"
         :api-fn="loadApplications"

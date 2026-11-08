@@ -34,11 +34,12 @@
       :closable="false"
       show-icon
     />
-    <div class="interface-page__workspace business-workspace-content flex min-w-0 flex-col">
+    <div class="interface-page__workspace business-workspace-content min-h-0 flex-1">
       <ArtTableQuery
         ref="tableQueryRef"
         v-model="filters"
         v-model:show-search-bar="showSearchBar"
+        class="h-full"
         focusable
         focus-scope-selector=".interface-page__workspace"
         :api-fn="loadInterfaces"
