@@ -1,0 +1,1 @@
+import{C as e}from"./sys-BW9-CVPx.js";function t(){return e(`/api/control/members`)}function n(t){return e(`/api/control/members/provision`,{method:`POST`,body:JSON.stringify(t)})}function r(t){return e(`/api/control/members`,{method:`POST`,body:JSON.stringify(t)})}export{n,r,t};

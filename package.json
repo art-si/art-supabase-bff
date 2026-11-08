@@ -30,7 +30,7 @@
     "@element-plus/icons-vue": "^2.3.2",
     "@supabase/supabase-js": "^2.117.3",
     "@vueuse/core": "^15.0.0",
-    "art-supabase-pro": "https://gitee.com/art-si/art-supabase-pro/repository/archive/b9259605d7e88f5784512e5ffb49d1ac36da0714.tar.gz",
+    "art-supabase-pro": "https://gitee.com/art-si/art-supabase-pro/repository/archive/d6e0fe0c3b0e634f01ce5b539d0fb56b4918fb99.tar.gz",
     "dayjs": "^1.11.23",
     "dotenv": "17.4.2",
     "dotenv-expand": "12.0.3",

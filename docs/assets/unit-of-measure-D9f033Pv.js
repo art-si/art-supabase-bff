@@ -1,1 +1,0 @@
-import{J as e}from"./sys-DK7sJy7l.js";var{supabase:t,responseHandle:n}=e();async function r(e){return{data:[],error:null}}export{r as fetchMaterialUnitCompatibilityOptions};
