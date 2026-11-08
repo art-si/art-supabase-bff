@@ -241,4 +241,7 @@ test('encrypted replay accepts bounded declared pages and rejects extra row fiel
   }
   const unsafeCipher = sealGatewayReplay(actor, candidate, unsafe, key)
   assert.throws(() => openGatewayReplay(actor, candidate, response.requestId, unsafeCipher, key))
+  const oversizedPage = { ...response, data: { ...response.data, size: 1 } }
+  const oversizedCipher = sealGatewayReplay(actor, candidate, oversizedPage, key)
+  assert.throws(() => openGatewayReplay(actor, candidate, response.requestId, oversizedCipher, key))
 })

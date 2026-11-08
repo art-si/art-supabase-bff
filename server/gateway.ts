@@ -293,6 +293,7 @@ function openGatewayReplayForMember(
       typeof page.size !== 'number' ||
       page.size < 1 ||
       page.size > 100 ||
+      page.records.length > page.size ||
       Object.keys(page).some((key) => !['records', 'total', 'current', 'size'].includes(key)) ||
       page.records.some(
         (row: unknown) =>

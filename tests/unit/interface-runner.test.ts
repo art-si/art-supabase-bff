@@ -178,6 +178,10 @@ test('page projection keeps only declared rows and requires a verified total', (
   assert.ok(!JSON.stringify(result).includes('never-return'))
   assert.throws(() => projectInterfacePage(page, source, '0-1/*', { current: 1, size: 2 }))
   assert.throws(() => projectInterfacePage(page, source, '0-1/2', { current: 1, size: 101 }))
+  assert.throws(
+    () => projectInterfacePage(page, source, '0-1/2', { current: 1, size: 1 }),
+    (error: unknown) => error instanceof HttpError && error.code === 'INVALID_PAGE_RESULT'
+  )
   assert.throws(() =>
     projectInterfacePage(page, source, '0-1/2', { current: 1, size: 2 }, (value) => value === 'A')
   )

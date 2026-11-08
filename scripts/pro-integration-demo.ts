@@ -231,7 +231,7 @@ async function ensureUpstream(
       row.tenant_id !== manifest.tenant ||
       row.created_by !== manifest.actor ||
       row.description !== markerText(manifest) ||
-      row.base_url !== responderOrigin ||
+      row.base_url !== new URL(responderOrigin).href ||
       row.auth_type !== 'none'
     )
       throw new Error(`Existing upstream ${code} is not this demo fixture`)
@@ -526,16 +526,12 @@ async function verifyAndPublish(
   const release = releaseRecordDto(record(ready.record))
   const observations = [target.observed]
   const scopedReady = checked(
-    await database.rpc(
-      'bff_release_targets_ready',
-      {
-        p_interface: item.id,
-        p_version_id: null,
-        p_observed: observations,
-        p_publish: true
-      },
-      { get: true }
-    )
+    await database.rpc('bff_release_targets_ready', {
+      p_interface: item.id,
+      p_version_id: null,
+      p_observed: observations,
+      p_publish: true
+    })
   )
   if (
     ready.routeConflict !== false ||
@@ -564,11 +560,22 @@ async function verifyAndPublish(
 function demoResponder() {
   return createServer((req, res) => {
     const url = new URL(req.url || '/', responderOrigin)
+    const offsetText = url.searchParams.get('offset')
+    const limitText = url.searchParams.get('limit')
+    const offset = Number(offsetText)
+    const limit = Number(limitText)
     if (
       req.method !== 'GET' ||
       !kinds.some((kind) => url.pathname === `/${kind}`) ||
-      url.searchParams.get('offset') !== '0' ||
-      url.searchParams.get('limit') !== '2' ||
+      url.searchParams.size !== 2 ||
+      !offsetText ||
+      !/^(0|[1-9]\d*)$/.test(offsetText) ||
+      !Number.isSafeInteger(offset) ||
+      offset > 100_000_000 ||
+      !limitText ||
+      !/^[1-9]\d*$/.test(limitText) ||
+      !Number.isSafeInteger(limit) ||
+      limit > 100 ||
       req.headers.authorization ||
       req.headers.cookie
     ) {
@@ -576,10 +583,9 @@ function demoResponder() {
       return
     }
     const kind = url.pathname.slice(1) as Kind
-    const rows = [1, 2].map((number) => ({
-      id: `${kind}-${number}`,
-      name: `${kind} 示例 ${number}`
-    }))
+    const rows = [1, 2]
+      .map((number) => ({ id: `${kind}-${number}`, name: `${kind} 示例 ${number}` }))
+      .slice(offset, offset + limit)
     const value =
       kind === 'java'
         ? { code: 0, data: { records: rows, total: 2 } }
@@ -592,7 +598,9 @@ function demoResponder() {
     }
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
-      ...(kind === 'supabase' ? { 'Content-Range': '0-1/2' } : {})
+      ...(kind === 'supabase'
+        ? { 'Content-Range': rows.length ? `${offset}-${offset + rows.length - 1}/2` : '*/2' }
+        : {})
     })
     res.end(JSON.stringify(value))
   })

@@ -140,8 +140,8 @@ export function projectInterfacePage(
   const at = (value: unknown, pointer: string): unknown =>
     pointer === '' ? value : get(value, pointerSegments(pointer))
   const records: unknown = at(source, definition.recordsPointer)
-  if (!Array.isArray(records) || records.length > 100)
-    throw new HttpError(502, '上游分页记录缺失或超过 100 条', 'INVALID_PAGE_RESULT')
+  if (!Array.isArray(records) || records.length > size)
+    throw new HttpError(502, '上游分页记录缺失或超过请求的每页数量', 'INVALID_PAGE_RESULT')
   let total: unknown
   if (definition.totalSource === 'body') total = at(source, definition.totalPointer)
   else {
