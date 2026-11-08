@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('PrepareMemberDirectory','InspectBusinessDictionaries','SyncBusinessDictionaries','Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','InspectResources','InspectBffActivity','AuditBffSecurity','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation','EnableObservabilityNavigation','DisableObservabilityNavigation')][string]$Action = 'Inspect',
+  [ValidateSet('SyncWordmarkPermission','PrepareMemberDirectory','InspectBusinessDictionaries','SyncBusinessDictionaries','Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','InspectResources','InspectBffActivity','AuditBffSecurity','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation','EnableObservabilityNavigation','DisableObservabilityNavigation')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -182,6 +182,34 @@ select jsonb_build_object(
   Invoke-BffQuery $taskQuery | ConvertTo-Json -Depth 20
   exit
 }
+if ($Action -eq 'SyncWordmarkPermission') {
+  $taskMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
+  if ($bffRef -ne 'bksbwnxdurmuolygiofh' -or $taskMcp.mcpServers.supabase.url -notmatch 'project_ref=bksbwnxdurmuolygiofh(?:&|$)') {
+    throw 'BFF wordmark project scope mismatch.'
+  }
+  $taskSource = Get-Content -Raw -Encoding UTF8 -LiteralPath 'server/database/schema.sql'
+  $taskBlock = [regex]::Match($taskSource,'(?s)-- BEGIN BFF WORDMARK PERMISSION\r?\n(.*?)-- END BFF WORDMARK PERMISSION')
+  if (!$taskBlock.Success) { throw 'Canonical wordmark permission seed is missing.' }
+  $taskBefore = @(Invoke-BffQuery @'
+select jsonb_build_object('menus',(select coalesce(jsonb_agg(to_jsonb(m)),'[]'::jsonb) from public.bff_menus m),
+  'revisions',(select coalesce(jsonb_agg(to_jsonb(r)),'[]'::jsonb) from public.bff_resource_revisions r where resource='menus')) as snapshot
+'@)
+  if ($taskBefore.Count -ne 1 -or $null -eq $taskBefore[0].snapshot.menus) { throw 'Menu recovery snapshot is invalid.' }
+  $taskBackupDirectory = Join-Path (Get-Location) '.artifacts/database'
+  New-Item -ItemType Directory -Path $taskBackupDirectory -Force | Out-Null
+  $taskBackupPath = Join-Path $taskBackupDirectory ('bff-wordmark-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '.json')
+  [IO.File]::WriteAllText($taskBackupPath,(@{project=$bffRef;snapshot=$taskBefore[0].snapshot}|ConvertTo-Json -Depth 50),[Text.Encoding]::UTF8)
+  $taskRecovery = Get-Content -Raw -LiteralPath $taskBackupPath | ConvertFrom-Json
+  if ($taskRecovery.project -ne $bffRef -or @($taskRecovery.snapshot.menus).Count -ne @($taskBefore[0].snapshot.menus).Count) {
+    throw 'Menu recovery verification failed.'
+  }
+  $taskAssertions = Get-Content -Raw -Encoding UTF8 -LiteralPath 'tests/integration/wordmark-permission.sql'
+  $taskSeed = $taskBlock.Groups[1].Value
+  $null = Invoke-BffQuery ("begin;`n"+$taskSeed+"`n"+$taskSeed+"`n"+$taskAssertions+"`nrollback;")
+  $null = Invoke-BffQuery ("begin;`n"+$taskSeed+"`ncommit;")
+  Invoke-BffQuery ("begin;`n"+$taskAssertions+"`nrollback;") | ConvertTo-Json -Depth 5
+  exit
+}
 if ($Action -in @('InspectBusinessDictionaries','SyncBusinessDictionaries')) {
   $taskMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
   if ($bffRef -ne 'bksbwnxdurmuolygiofh' -or $taskMcp.mcpServers.supabase.url -notmatch 'project_ref=bksbwnxdurmuolygiofh(?:&|$)') {
@@ -305,7 +333,7 @@ if ($Action -in @('EnableUpstreamNavigation','EnableInterfaceNavigation','Enable
   $taskNavigationValue = if ($Action.StartsWith('Disable')) { 'false' } else { 'true' }
   $taskPageName = switch ($taskCapability) { 'branding' { 'BffBranding' }; 'resources' { 'BffResources' }; 'releases' { 'BffReleases' }; 'interfaces' { 'BffInterfaces' }; default { 'BffUpstreams' } }
   $taskPermissionPrefix = switch ($taskCapability) { 'branding' { 'System:WebsiteConfig' }; 'resources' { 'BffResource' }; 'releases' { 'BffRelease' }; 'interfaces' { 'BffInterface' }; default { 'BffUpstream' } }
-  $taskActions = switch ($taskCapability) { 'branding' { @('View','Publish') }; 'resources' { @('View','Add','Edit','Delete') }; 'releases' { @('View','Publish','Rollback','ChangeStatus') }; 'interfaces' { @('View','Add','Edit','Validate','Test','TestWrite','Delete') }; default { @('View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete') } }
+  $taskActions = switch ($taskCapability) { 'branding' { @('View','Publish','GenerateWordmark') }; 'resources' { @('View','Add','Edit','Delete') }; 'releases' { @('View','Publish','Rollback','ChangeStatus') }; 'interfaces' { @('View','Add','Edit','Validate','Test','TestWrite','Delete') }; default { @('View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete') } }
   $taskParentName = switch ($taskCapability) { 'branding' { 'BffSystem' }; 'resources' { 'BffDataCenter' }; default { 'BffServiceManagement' } }
   $taskParentPath = switch ($taskCapability) { 'branding' { '/system' }; 'resources' { '/data-center' }; default { '/services' } }
   $taskPagePath = switch ($taskCapability) { 'branding' { '/system/website-config' }; 'resources' { '/data-center/attachment' }; default { "/$taskCapability" } }

@@ -1,0 +1,57 @@
+name: Build Node deployment package
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Public test sentinels detect accidental server-to-browser leakage.
+      # Real credentials are supplied only by the deployment server.
+      BFF_ORIGIN: https://bff.example.invalid
+      BFF_AUTH_CLIENT_SECRET: ci-server-only-oauth-sentinel-2026
+      BFF_SESSION_KEY: ci-server-only-session-sentinel-2026
+      BFF_SUPABASE_SERVICE_KEY: ci-server-only-database-sentinel-2026
+      BFF_IDENTITY_DIRECTORY_SERVICE_KEY: ci-server-only-directory-sentinel-2026
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install the project package manager
+        run: npm install --global pnpm@11.28.2
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check source
+        run: pnpm check
+      - name: Build production frontend
+        run: pnpm build
+      - name: Check browser assets for server credentials
+        run: pnpm verify:bundle
+      - name: Package the Node application and docs
+        run: |
+          mkdir -p .artifacts
+          tar -czf .artifacts/art-supabase-bff-node.tar.gz \
+            docs server src/types package.json pnpm-lock.yaml pnpm-workspace.yaml \
+            tsconfig.json tsconfig.server.json vite.config.ts .env.example README.md
+      - uses: actions/upload-artifact@v7
+        with:
+          name: art-supabase-bff-node-${{ github.sha }}
+          path: .artifacts/art-supabase-bff-node.tar.gz
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14

@@ -12,13 +12,18 @@ export async function generateBrandWordmark(
   session: Session
 ): Promise<unknown> {
   requireMutation(req, session)
-  for (const permission of ['System:WebsiteConfig:Publish', 'BffResource:Add']) {
+  for (const permission of [
+    'System:WebsiteConfig:Publish',
+    'System:WebsiteConfig:GenerateWordmark',
+    'BffResource:Add'
+  ]) {
     const result = await database.rpc('bff_actor_can', {
       p_actor: session.member.id,
       p_permission: permission
     })
     controlFailure(result.error)
-    if (result.data !== true) throw new HttpError(403, '生成品牌字图需要网站配置发布和资源上传权限')
+    if (result.data !== true)
+      throw new HttpError(403, '生成品牌字图需要 AI 艺术字生成、网站配置发布和资源上传权限')
   }
   const input = await body(req, 4096)
   const siteName = text(input.siteName, '系统名称', 60, true)

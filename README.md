@@ -27,6 +27,23 @@
 
 数据库已经初始化。server/database/schema.sql 是唯一的完整结构定义，不是增量迁移；不要把它用于 pro。
 
+## GitHub Actions 与 Node 部署
+
+本仓库会提交 `docs/` 生产前端产物。Gitee 同步到 GitHub 后，`Build Node deployment package` 工作流会在 master/main 推送时执行检查、重新构建，并上传包含 `docs`、Node 服务端和锁文件的部署包；也可在 Actions 中手动运行。构建使用公开测试标记检查密钥泄漏，不需要配置真实服务端密钥。
+
+`docs` 需要由 Node BFF 在同一域名下提供。GitHub Pages 只能提供静态文件，不能单独运行本项目的登录回调、会话和 API。
+
+Node 服务器部署步骤：
+
+1. 安装 Node.js 24 和 pnpm 11.28.2；下载 Actions 的 `art-supabase-bff-node-*` 产物，解压其中的 tar.gz 到独立发布目录。
+2. 执行 `pnpm install --frozen-lockfile`。当前 TypeScript 服务运行时还依赖 tsx 和 Vite，不能只安装生产依赖。
+3. 通过服务器环境变量或服务器本地 `.env.local` 配置 `.env.example` 中的值，将 `BFF_ORIGIN` 设置为实际 HTTPS 域名；沿用原有会话及凭据加密密钥。真实配置不要放入 Git、Actions 构建产物或任何 `VITE_` 变量。
+4. 在 pro 身份中心登记精确的 `https://你的域名/api/auth/callback`，保持 OAuth 客户端配置与服务器一致。
+5. 使用 systemd、容器或现有进程管理器执行 `pnpm start`。服务监听本机 `127.0.0.1:BFF_PORT`，由 HTTPS 反向代理将该域名的全部请求转发到该端口，保留同源 API 和 HttpOnly Cookie。
+6. 检查 `/api/health`，再验证真实登录和业务页面。数据库结构另由有权限的部署者通过 scoped CLI 审核并应用 canonical schema，构建工作流不自动变更数据库。
+
+当前工作流负责检查和交付部署包；尚未配置远程服务器连接及自动重启步骤，需根据实际 Node 托管环境接入部署作业。
+
 ## 统一认证
 
 采用授权码 + PKCE + 浏览器绑定 state。为兼容 pro 当前 HS256 签名，申请 email profile 权限，并通过身份中心的 UserInfo 接口确认用户；不请求需要更换签名密钥的 OIDC ID Token。所有返回地址均由 OAuth 客户端预注册。

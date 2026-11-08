@@ -1710,7 +1710,7 @@ begin
         when entry.mark='BffUpstream' then array['View','Add','Edit','ChangeStatus','Test','RotateSecret','Delete']
         when entry.mark='BffInterface' then array['View','Add','Edit','Validate','Test','TestWrite','Delete']
         when entry.mark='BffRelease' then array['View','Publish','Rollback','ChangeStatus']
-        when entry.mark='System:WebsiteConfig' then array['View','Publish']
+        when entry.mark='System:WebsiteConfig' then array['View','Publish','GenerateWordmark']
         when entry.mark='BffResource' then array['View','Add','Edit','Delete']
         when entry.name='BffCalls' then array['View']
         when entry.name='BffAlertRules' then array['View','Add','Edit','ChangeStatus','Archive','Evaluate']
@@ -1718,7 +1718,7 @@ begin
         when entry.mark='System:Role' then array['View','Add','Edit','Delete','AssignPermission','AssignUser']
         when entry.mark='System:Member' then array['View','Add','Edit'] else array['View','Add','Edit','Delete'] end loop
         insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
-          values(actor.tenant_id,page,case when entry.name='BffAlertRules' and action='View' then 'BffAlertRule:View' else entry.mark||':'||action end,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then case when entry.mark='System:Member' then '开通成员' else '新增' end when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Archive' then '归档' when 'Acknowledge' then '确认告警' when 'Evaluate' then '立即评估' when 'Publish' then case when entry.mark='System:WebsiteConfig' then '发布配置' else '发布版本' end when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
+          values(actor.tenant_id,page,case when entry.name='BffAlertRules' and action='View' then 'BffAlertRule:View' else entry.mark||':'||action end,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then case when entry.mark='System:Member' then '开通成员' else '新增' end when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Archive' then '归档' when 'Acknowledge' then '确认告警' when 'Evaluate' then '立即评估' when 'GenerateWordmark' then 'AI 艺术字生成' when 'Publish' then case when entry.mark='System:WebsiteConfig' then '发布配置' else '发布版本' end when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
             'isEnable',entry.mark not in ('BffInterface','BffRelease','System:WebsiteConfig','BffCall','BffAlert','BffResource')),true,actor.id,actor.id)
           on conflict (tenant_id,name) do nothing;
       end loop;
@@ -4291,4 +4291,41 @@ begin
   end loop;
 end $bff_module_dictionaries$;
 -- END BFF MODULE DICTIONARIES
+-- BEGIN BFF WORDMARK PERMISSION
+do $bff_wordmark_permission$
+declare actor record; page uuid; changed integer; affected integer; system_page uuid; ai_page uuid;
+begin
+  for actor in select distinct on (tenant_id) id,tenant_id from public.bff_members
+    where enabled and role='admin' order by tenant_id,created_at,id loop
+    select id into page from public.bff_menus where tenant_id=actor.tenant_id and name='BffBranding';
+    if page is null then continue; end if;
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||actor.tenant_id::text,0));
+    insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
+      values(actor.tenant_id,page,'System:WebsiteConfig:GenerateWordmark','button',
+        jsonb_build_object('title','AI 艺术字生成','icon','ri:magic-line','isEnable',true),true,actor.id,actor.id)
+      on conflict(tenant_id,name) do update set
+        meta=jsonb_set(jsonb_set(public.bff_menus.meta,'{title}','"AI 艺术字生成"'::jsonb),'{isEnable}','true'::jsonb),
+        version=public.bff_menus.version+1,update_by=actor.id,update_time=now()
+      where public.bff_menus.meta->>'title' is distinct from 'AI 艺术字生成'
+        or public.bff_menus.meta->>'isEnable' is distinct from 'true';
+    get diagnostics changed=row_count;
+    select id into system_page from public.bff_menus where tenant_id=actor.tenant_id and name='BffSystem';
+    if system_page is not null then
+      insert into public.bff_menus(tenant_id,parent_id,name,type,sort,meta,builtin,create_by,update_by)
+        values(actor.tenant_id,system_page,'BffAiConfiguration','menu',50,
+          jsonb_build_object('title','AI 配置中心','icon','ri:equalizer-2-line','isEnable',true,
+            'link','https://art-si.github.io/art-supabase-pro/#/system/ai-configuration'),true,actor.id,actor.id)
+        on conflict(tenant_id,name) do nothing;
+      get diagnostics affected=row_count; changed:=changed+affected;
+      select id into ai_page from public.bff_menus where tenant_id=actor.tenant_id and name='BffAiConfiguration';
+      insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
+        values(actor.tenant_id,ai_page,'System:AiConfiguration:View','button',
+          jsonb_build_object('title','打开集中 AI 配置','isEnable',true),true,actor.id,actor.id)
+        on conflict(tenant_id,name) do nothing;
+      get diagnostics affected=row_count; changed:=changed+affected;
+    end if;
+    if changed>0 then perform public.bff_control_advance(actor.id,'menus','menu.wordmark_permission',page,'{}'::jsonb); end if;
+  end loop;
+end $bff_wordmark_permission$;
+-- END BFF WORDMARK PERMISSION
 commit;

@@ -1,0 +1,1 @@
+import{q as e}from"./sys-BkuUUnoD.js";var{supabase:t,responseHandle:n}=e();async function r(e){return{data:[],error:null}}export{r as fetchMaterialUnitCompatibilityOptions};

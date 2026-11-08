@@ -1,0 +1,2 @@
+# Preserve generated deployment bytes and avoid reviewing minified/vendor files as source.
+docs/** binary linguist-generated=true

@@ -81,7 +81,12 @@ function initialBranding(): BffBrandingRecord {
   }
 }
 
-async function mockBranding(page: Page, canPublish: boolean, waitForSession?: Promise<void>) {
+async function mockBranding(
+  page: Page,
+  canPublish: boolean,
+  waitForSession?: Promise<void>,
+  canGenerate = false
+) {
   const state = {
     record: initialBranding(),
     resources: [
@@ -89,6 +94,8 @@ async function mockBranding(page: Page, canPublish: boolean, waitForSession?: Pr
       sampleResource(102, '示例浏览器图标.ico')
     ],
     uploads: 0,
+    wordmarkRequests: [] as string[],
+    failWordmark: false,
     writes: [] as BffBrandingWriteInput[],
     conflictNext: false,
     brandingReads: 0,
@@ -173,6 +180,7 @@ async function mockBranding(page: Page, canPublish: boolean, waitForSession?: Pr
           ? [
               'System:WebsiteConfig:View',
               'System:WebsiteConfig:Publish',
+              ...(canGenerate ? ['System:WebsiteConfig:GenerateWordmark'] : []),
               'System:Role:View',
               'BffResource:View',
               'BffResource:Add',
@@ -211,6 +219,21 @@ async function mockBranding(page: Page, canPublish: boolean, waitForSession?: Pr
             type: 'menu',
             sort: 3,
             meta: { title: '角色与权限', icon: 'ri:shield-user-line', isEnable: true }
+          },
+          {
+            id: '99999999-9999-4999-8999-999999999999',
+            parentId: null,
+            path: '',
+            component: '',
+            name: 'BffAiConfiguration',
+            type: 'menu',
+            sort: 4,
+            meta: {
+              title: 'AI 配置中心',
+              icon: 'ri:equalizer-2-line',
+              isEnable: true,
+              link: 'https://art-si.github.io/art-supabase-pro/#/system/ai-configuration'
+            }
           }
         ]
       })
@@ -284,6 +307,31 @@ async function mockBranding(page: Page, canPublish: boolean, waitForSession?: Pr
           }
         ]
       })
+      return
+    }
+    if (url.pathname === '/api/control/branding/wordmark' && method === 'POST') {
+      expect(request.headers()['x-csrf-token']).toBe('synthetic-branding-ui')
+      const input: unknown = request.postDataJSON()
+      if (
+        !input ||
+        typeof input !== 'object' ||
+        !('siteName' in input) ||
+        typeof input.siteName !== 'string'
+      )
+        throw new Error('Expected a wordmark site name')
+      state.wordmarkRequests.push(input.siteName)
+      if (state.failWordmark) {
+        state.failWordmark = false
+        await reply({ message: '验收：字图服务暂时不可用' }, 503)
+      } else {
+        await reply({
+          imageBase64: image.toString('base64'),
+          mimeType: 'image/webp',
+          runId: 'fixture-wordmark',
+          model: 'fixture',
+          generatedAt: timestamp
+        })
+      }
       return
     }
     if (url.pathname === '/api/control/branding' && method === 'GET') {
@@ -438,6 +486,48 @@ test('shared full website page saves two configurations and keeps edits after CA
   expect(state.unexpected).toEqual([])
   expect(state.errors).toEqual([])
   expect(state.vueErrors).toEqual([])
+})
+
+test('pro AI wordmark entry retries generation, uploads both themes and publishes their URLs', async ({
+  page
+}) => {
+  const state = await mockBranding(page, true, undefined, true)
+  await page.goto('/system/website-config')
+  await page.getByRole('button', { name: '系统标识', exact: true }).click()
+  await page.getByRole('switch', { name: '使用品牌字图' }).locator('..').click()
+  const generate = page.getByRole('button', { name: 'AI 艺术字生成' })
+  await expect(generate).toBeEnabled()
+  state.failWordmark = true
+  await generate.click()
+  await expect(page.getByText('验收：字图服务暂时不可用')).toBeVisible()
+  expect(state.uploads).toBe(0)
+  await generate.click()
+  await expect.poll(() => state.uploads).toBe(2)
+  await expect(page.getByText('同款浅色与深色菜单字图已生成，请确认文字无误后再发布')).toBeVisible()
+  expect(state.wordmarkRequests).toEqual([
+    state.record.config.siteName,
+    state.record.config.siteName
+  ])
+  expect(state.writes).toHaveLength(0)
+  mkdirSync(path.resolve('.artifacts/ui'), { recursive: true })
+  await page.screenshot({ path: '.artifacts/ui/branding-ai-wordmark.png', fullPage: true })
+  await page.getByRole('button', { name: '保存并发布配置' }).click()
+  await expect.poll(() => state.writes.length).toBe(1)
+  expect(state.writes[0].config.wordmarkImageEnabled).toBe(true)
+  expect(state.writes[0].config.wordmarkLightUrl).toMatch(/^\/api\/resources\/10[34]\/content$/)
+  expect(state.writes[0].config.wordmarkDarkUrl).toMatch(/^\/api\/resources\/10[34]\/content$/)
+  expect(state.writes[0].config.wordmarkLightUrl).not.toBe(state.writes[0].config.wordmarkDarkUrl)
+  expect(state.unexpected).toEqual([])
+  expect(state.errors).toEqual([])
+})
+
+test('publishing permission alone does not expose AI generation', async ({ page }) => {
+  const state = await mockBranding(page, true)
+  await page.goto('/system/website-config')
+  await page.getByRole('button', { name: '系统标识', exact: true }).click()
+  await page.getByRole('switch', { name: '使用品牌字图' }).locator('..').click()
+  await expect(page.getByRole('button', { name: 'AI 艺术字生成' })).toHaveCount(0)
+  expect(state.wordmarkRequests).toHaveLength(0)
 })
 
 test('shared full website page is read only without System:WebsiteConfig:Publish', async ({

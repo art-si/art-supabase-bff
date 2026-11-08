@@ -57,7 +57,7 @@ foreach ($log in Get-ChildItem -LiteralPath $taskRoot -Force -File -Filter '.art
   }
 }
 
-# Older browser builds used dist; current builds use ignored docs.
+# Older browser builds used dist; current production assets are tracked under docs.
 $legacyBuild = Join-Path $taskRoot 'dist'
 if (Test-Path -LiteralPath $legacyBuild) {
   $legacyBuild = Assert-LocalArtifact $legacyBuild

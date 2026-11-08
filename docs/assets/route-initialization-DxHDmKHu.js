@@ -1,0 +1,1 @@
+function e(e){let t=Array.isArray(e)?e[0]:e,n=new Set;for(;typeof t==`string`&&t.length>0;){if(!t.startsWith(`/`)||t.startsWith(`//`)||n.has(t))return`/`;n.add(t);let e=new URL(t,`https://route-recovery.invalid`);if(e.pathname!==`/500`)return`${e.pathname}${e.search}${e.hash}`;t=e.searchParams.get(`redirect`)}return`/`}export{e as t};
