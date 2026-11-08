@@ -7,7 +7,7 @@ services:
     buildCommand: corepack pnpm install --frozen-lockfile --prod=false && corepack pnpm build && corepack pnpm verify:bundle
     startCommand: npm start
     healthCheckPath: /api/health
-    autoDeployTrigger: 'off'
+    autoDeployTrigger: commit
     envVars:
       - key: NODE_VERSION
         value: 24.22.1
