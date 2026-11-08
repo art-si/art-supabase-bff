@@ -5,6 +5,7 @@ import test from 'node:test'
 import {
   classifyExecutionCode,
   classifyExecutionError,
+  projectInterfacePage,
   runInterface
 } from '../../server/interface-runner'
 import type { InterfaceStepTarget } from '../../server/interface-runner'
@@ -137,4 +138,187 @@ test('stable network and HTTP codes determine error categories without inspectin
   assert.equal(classifyExecutionCode('dns_failed'), 'unknown')
   assert.equal(classifyExecutionError(new HttpError(504, 'arbitrary')), 'timeout')
   assert.equal(classifyExecutionError(new HttpError(409, 'arbitrary', 'RESULT_UNKNOWN')), 'unknown')
+})
+
+test('page projection keeps only declared rows and requires a verified total', () => {
+  const page = {
+    stepKey: 'load',
+    recordsPointer: '/records',
+    totalSource: 'content-range' as const,
+    totalPointer: '',
+    currentInputKey: 'current',
+    sizeInputKey: 'size',
+    fields: [
+      { target: 'id', label: '编号', pointer: '/id', type: 'string' as const, required: true },
+      {
+        target: 'quantity',
+        label: '数量',
+        pointer: '/quantity',
+        type: 'number' as const,
+        required: false
+      }
+    ]
+  }
+  const source = {
+    records: [
+      { id: 'A', quantity: 2, privateKey: 'never-return' },
+      { id: 'B', privateKey: 'never-return' }
+    ]
+  }
+  const result = projectInterfacePage(page, source, '0-1/2', { current: 1, size: 2 })
+  assert.deepEqual(result, {
+    records: [
+      { id: 'A', quantity: 2 },
+      { id: 'B', quantity: null }
+    ],
+    total: 2,
+    current: 1,
+    size: 2
+  })
+  assert.ok(!JSON.stringify(result).includes('never-return'))
+  assert.throws(() => projectInterfacePage(page, source, '0-1/*', { current: 1, size: 2 }))
+  assert.throws(() => projectInterfacePage(page, source, '0-1/2', { current: 1, size: 101 }))
+  assert.throws(() =>
+    projectInterfacePage(page, source, '0-1/2', { current: 1, size: 2 }, (value) => value === 'A')
+  )
+  assert.throws(() =>
+    projectInterfacePage(page, { records: Array(101).fill({ id: 'A' }) }, '0-100/101', {
+      current: 1,
+      size: 100
+    })
+  )
+})
+
+test('paginated GET derives controlled offset and returns only declared rows', async () => {
+  const received: string[] = []
+  const server = createServer((request, response) => {
+    received.push(`${request.url}|${request.headers.prefer}`)
+    response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Range': '0-1/2' })
+    response.end(
+      JSON.stringify([
+        { name: '示例甲', privateValue: 'never-return' },
+        { name: '示例乙', privateValue: 'never-return' }
+      ])
+    )
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  assert.ok(address && typeof address !== 'string')
+  const origin = `http://127.0.0.1:${address.port}`
+  try {
+    const definition = interfaceRecordFixture()
+    definition.path = '/items'
+    definition.definition.inputs = [
+      { key: 'current', label: '页码', location: 'query', type: 'number', required: true },
+      { key: 'size', label: '页长', location: 'query', type: 'number', required: true }
+    ]
+    definition.definition.steps = [
+      {
+        ...definition.definition.steps[0],
+        key: 'load',
+        method: 'GET',
+        path: '/items',
+        pathParams: [],
+        query: [],
+        body: [],
+        pagination: {
+          mode: 'offset',
+          currentInputKey: 'current',
+          sizeInputKey: 'size',
+          pageParameter: 'offset',
+          sizeParameter: 'limit',
+          exactCount: true
+        }
+      }
+    ]
+    definition.definition.outputs = []
+    definition.definition.page = {
+      stepKey: 'load',
+      recordsPointer: '',
+      totalSource: 'content-range',
+      totalPointer: '',
+      currentInputKey: 'current',
+      sizeInputKey: 'size',
+      fields: [{ target: 'name', label: '名称', pointer: '/name', type: 'string', required: true }]
+    }
+    const result = await runInterface(
+      definition,
+      { current: 1, size: 2 },
+      async () => ({ baseUrl: origin, timeoutMs: 2000 }),
+      {
+        policy: {
+          allowedOrigins: [origin],
+          allowedCidrs: [],
+          allowLocalHttp: true,
+          production: false
+        }
+      }
+    )
+    assert.equal(result.passed, true, JSON.stringify(result))
+    assert.deepEqual(result.output, {
+      records: [{ name: '示例甲' }, { name: '示例乙' }],
+      total: 2,
+      current: 1,
+      size: 2
+    })
+    assert.deepEqual(received, ['/items?offset=0&limit=2|count=exact'])
+    assert.ok(!JSON.stringify(result).includes('never-return'))
+  } finally {
+    server.close()
+    await once(server, 'close')
+  }
+})
+
+test('HTTP 200 business failure stops composition without exposing provider data', async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({ code: 4001, data: { secret: 'never-return' } }))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  assert.ok(address && typeof address !== 'string')
+  const origin = `http://127.0.0.1:${address.port}`
+  try {
+    const definition = interfaceRecordFixture()
+    definition.definition.steps = [
+      {
+        ...definition.definition.steps[0],
+        path: '/error',
+        pathParams: [],
+        query: [],
+        body: [],
+        responseContract: {
+          mode: 'business',
+          codePointer: '/code',
+          dataPointer: '/data',
+          successCodes: [0]
+        }
+      }
+    ]
+    definition.definition.outputs = [
+      stepBinding('value', definition.definition.steps[0].key, '/secret')
+    ]
+    const result = await runInterface(
+      definition,
+      { orderId: 'A' },
+      async () => ({ baseUrl: origin, timeoutMs: 2000 }),
+      {
+        policy: {
+          allowedOrigins: [origin],
+          allowedCidrs: [],
+          allowLocalHttp: true,
+          production: false
+        }
+      }
+    )
+    assert.equal(result.passed, false)
+    assert.equal(result.steps[0].code, 'business_error')
+    assert.deepEqual(result.output, {})
+    assert.ok(!JSON.stringify(result).includes('never-return'))
+  } finally {
+    server.close()
+    await once(server, 'close')
+  }
 })

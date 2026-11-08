@@ -187,19 +187,105 @@
                   :steps="form.definition.steps.slice(0, index)"
                   @update:model-value="(value) => (step.body = value)"
                 />
+                <ArtSectionCard
+                  title="响应解析"
+                  subtitle="只读取声明的 JSON Pointer；业务码不匹配视为上游失败。"
+                  preserve-content-structure
+                >
+                  <ArtForm
+                    v-model="contractDrafts[index]"
+                    :items="responseItems(index)"
+                    :span="12"
+                    :gutter="12"
+                    label-position="top"
+                    root-class="p-0!"
+                  />
+                </ArtSectionCard>
+                <ArtSectionCard
+                  v-if="step.method === 'GET'"
+                  title="上游分页"
+                  subtitle="分页参数由已声明的数字输入控制，不能覆盖显式查询映射。"
+                  preserve-content-structure
+                >
+                  <ArtForm
+                    v-model="contractDrafts[index]"
+                    :items="paginationItems(index)"
+                    :span="12"
+                    :gutter="12"
+                    label-position="top"
+                    root-class="p-0!"
+                  />
+                </ArtSectionCard>
               </div>
             </ArtSectionCard>
           </div>
         </ElTabPane>
         <ElTabPane :label="`输出映射（${form.definition.outputs.length}）`" name="outputs">
-          <BindingEditor
-            :model-value="form.definition.outputs"
-            label="对调用方公开的输出"
-            description="仅输出明确映射的扁平字段，不暴露上游原始响应、请求头或凭据。"
-            :inputs="form.definition.inputs"
-            :steps="form.definition.steps"
-            @update:model-value="(value) => (form.definition.outputs = value)"
-          />
+          <div class="grid min-w-0 gap-4">
+            <ArtForm
+              v-model="outputModeForm"
+              :items="outputModeItems"
+              :span="24"
+              label-position="top"
+              root-class="p-0!"
+            />
+            <BindingEditor
+              v-if="outputModeForm.mode === 'scalar'"
+              :model-value="form.definition.outputs"
+              label="对调用方公开的输出"
+              description="仅输出明确映射的扁平字段，不暴露上游原始响应、请求头或凭据。"
+              :inputs="form.definition.inputs"
+              :steps="form.definition.steps"
+              @update:model-value="(value) => (form.definition.outputs = value)"
+            />
+            <ArtSectionCard
+              v-else
+              title="分页结果"
+              subtitle="结果仅包含 records、total、current、size，记录字段必须逐项声明。"
+              preserve-content-structure
+            >
+              <div class="grid min-w-0 gap-4">
+                <ArtForm
+                  v-model="pageDraft"
+                  :items="pageItems"
+                  :span="12"
+                  :gutter="12"
+                  label-position="top"
+                  root-class="p-0!"
+                />
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <p class="text-sm text-g-700">记录白名单字段（最多 32 项）</p>
+                  <ElButton
+                    type="primary"
+                    plain
+                    :disabled="pageDraft.fields.length >= 32"
+                    @click="addPageField"
+                    ><ArtSvgIcon icon="ri:add-line" />新增字段</ElButton
+                  >
+                </div>
+                <ArtSectionCard
+                  v-for="(_, index) in pageDraft.fields"
+                  :key="index"
+                  :title="`记录字段 ${index + 1}`"
+                  preserve-content-structure
+                >
+                  <template #actions>
+                    <ElButton link type="danger" @click="removePageField(index)"
+                      ><ArtSvgIcon icon="ri:delete-bin-line" />移除</ElButton
+                    >
+                  </template>
+                  <ArtForm
+                    v-model="pageDraft.fields[index]"
+                    :items="pageFieldItems(index)"
+                    :span="12"
+                    :gutter="12"
+                    label-position="top"
+                    root-class="p-0!"
+                  />
+                </ArtSectionCard>
+              </div>
+            </ArtSectionCard>
+          </div>
         </ElTabPane>
       </ElTabs>
       <ElAlert v-if="saveError" :title="saveError" type="error" :closable="false" show-icon />
@@ -215,19 +301,24 @@
   const inputLocationOptions = useDictionaryOptions(BFF_DICTIONARIES.interfaces.inputLocation)
   const valueTypeOptions = useDictionaryOptions(BFF_DICTIONARIES.interfaces.valueType)
   const upstreamStatusOptions = useDictionaryOptions(BFF_DICTIONARIES.upstreams.status)
+  const responseModeOptions = useDictionaryOptions('bffResponseContractMode')
+  const paginationModeOptions = useDictionaryOptions('bffPaginationMode')
+  const totalSourceOptions = useDictionaryOptions('bffPageTotalSource')
   import type { FormRules } from 'element-plus'
   import { validateArtFormForSubmit } from '@/utils/form/validate-art-form'
   import type ArtForm from '@/components/core/forms/art-form/index.vue'
   import type { FormItem } from '@/components/core/forms/art-form/index.vue'
   import type { ArtDialogExpose } from '@/components/core/dialogs/art-dialog/types'
   import ArtSectionCard from '@/components/core/surfaces/art-section-card/index.vue'
-  import { cloneDeep } from 'lodash-es'
+  import { cloneDeep, omit } from 'lodash-es'
   import { BffApiError } from '@bff/api/bff'
   import { createInterface, updateInterface } from '@bff/api/interfaces'
   import type {
     InterfaceBinding,
     InterfaceOptions,
+    InterfacePageDefinition,
     InterfaceRecord,
+    InterfaceStep,
     InterfaceWriteInput
   } from '@bff/types/interface'
   import BindingEditor from './binding-editor.vue'
@@ -243,6 +334,49 @@
   const optionsLoadError = ref('')
   const saveError = ref('')
   const keyPattern = /^[A-Za-z][A-Za-z0-9_]{0,39}$/
+  interface ContractDraft {
+    responseEnabled: boolean
+    responseMode: 'http' | 'business'
+    codePointer: string
+    dataPointer: string
+    successCodesText: string
+    paginationEnabled: boolean
+    paginationMode: 'page' | 'offset'
+    currentInputKey: string
+    sizeInputKey: string
+    pageParameter: string
+    sizeParameter: string
+    exactCount: boolean
+  }
+  const contractDrafts = ref<ContractDraft[]>([])
+  const outputModeForm = ref<{ mode: 'scalar' | 'page' }>({ mode: 'scalar' })
+  const emptyPage = (): InterfacePageDefinition => ({
+    stepKey: '',
+    recordsPointer: '',
+    totalSource: 'body',
+    totalPointer: '',
+    currentInputKey: '',
+    sizeInputKey: '',
+    fields: []
+  })
+  const pageDraft = ref<InterfacePageDefinition>(emptyPage())
+
+  function contractDraft(step: InterfaceStep): ContractDraft {
+    return {
+      responseEnabled: Boolean(step.responseContract),
+      responseMode: step.responseContract?.mode ?? 'http',
+      codePointer: step.responseContract?.codePointer ?? '/code',
+      dataPointer: step.responseContract?.dataPointer ?? '/data',
+      successCodesText: JSON.stringify(step.responseContract?.successCodes ?? [0]),
+      paginationEnabled: Boolean(step.pagination),
+      paginationMode: step.pagination?.mode ?? 'page',
+      currentInputKey: step.pagination?.currentInputKey ?? '',
+      sizeInputKey: step.pagination?.sizeInputKey ?? '',
+      pageParameter: step.pagination?.pageParameter ?? 'page',
+      sizeParameter: step.pagination?.sizeParameter ?? 'size',
+      exactCount: step.pagination?.exactCount ?? false
+    }
+  }
 
   function newBinding(
     target: string,
@@ -516,6 +650,263 @@
     ]
   }
 
+  const numberInputOptions = computed(() =>
+    form.value.definition.inputs
+      .filter((field) => field.location === 'query' && field.type === 'number' && field.required)
+      .map((field) => ({ label: `${field.label || field.key}（${field.key}）`, value: field.key }))
+  )
+  const outputModeItems: FormItem[] = [
+    {
+      key: 'mode',
+      label: '对外输出形式',
+      type: 'segment',
+      span: 24,
+      options: [
+        { label: '普通字段', value: 'scalar' },
+        { label: '分页记录', value: 'page' }
+      ],
+      description: '分页模式仅返回明确列出的记录字段，不会透传上游响应。'
+    }
+  ]
+  function responseItems(index: number): FormItem[] {
+    const draft = contractDrafts.value[index]
+    return [
+      {
+        key: 'responseEnabled',
+        label: '解析统一响应',
+        type: 'switch',
+        span: 24,
+        props: { 'aria-label': `步骤 ${index + 1} 解析统一响应` },
+        description: '关闭时保留原始成功响应的既有解析行为；旧版本快照不受影响。'
+      },
+      {
+        key: 'responseMode',
+        label: '成功判定',
+        type: 'select',
+        span: 12,
+        hidden: () => !draft?.responseEnabled,
+        props: { options: responseModeOptions, 'aria-label': `步骤 ${index + 1} 成功判定` }
+      },
+      {
+        key: 'dataPointer',
+        label: '数据 JSON Pointer',
+        type: 'input',
+        span: 12,
+        hidden: () => !draft?.responseEnabled,
+        props: { maxlength: 256, placeholder: '/data', 'aria-label': `步骤 ${index + 1} 数据指针` },
+        description: '留空表示响应根节点；只接受 JSON Pointer，不执行表达式。'
+      },
+      {
+        key: 'codePointer',
+        label: '业务码 JSON Pointer',
+        type: 'input',
+        span: 12,
+        hidden: () => !draft?.responseEnabled || draft.responseMode !== 'business',
+        props: {
+          maxlength: 256,
+          placeholder: '/code',
+          'aria-label': `步骤 ${index + 1} 业务码指针`
+        }
+      },
+      {
+        key: 'successCodesText',
+        label: '成功业务码',
+        type: 'input',
+        span: 12,
+        hidden: () => !draft?.responseEnabled || draft.responseMode !== 'business',
+        props: {
+          maxlength: 512,
+          placeholder: '["0", 200]',
+          'aria-label': `步骤 ${index + 1} 成功业务码`
+        },
+        description: 'JSON 数组；字符串与数字严格区分，如 ["0", 200]。'
+      }
+    ]
+  }
+  function paginationItems(index: number): FormItem[] {
+    const draft = contractDrafts.value[index]
+    return [
+      {
+        key: 'paginationEnabled',
+        label: '启用受控分页',
+        type: 'switch',
+        span: 24,
+        props: { 'aria-label': `步骤 ${index + 1} 启用受控分页` },
+        description: '仅用于 GET；页码和每页条数取自调用方声明的必填数字输入。'
+      },
+      {
+        key: 'paginationMode',
+        label: '分页方式',
+        type: 'select',
+        span: 12,
+        hidden: () => !draft?.paginationEnabled,
+        props: { options: paginationModeOptions, 'aria-label': `步骤 ${index + 1} 分页方式` }
+      },
+      {
+        key: 'currentInputKey',
+        label: '页码输入',
+        type: 'select',
+        span: 12,
+        hidden: () => !draft?.paginationEnabled,
+        props: { options: numberInputOptions.value, 'aria-label': `步骤 ${index + 1} 页码输入` }
+      },
+      {
+        key: 'sizeInputKey',
+        label: '条数输入',
+        type: 'select',
+        span: 12,
+        hidden: () => !draft?.paginationEnabled,
+        props: { options: numberInputOptions.value, 'aria-label': `步骤 ${index + 1} 条数输入` }
+      },
+      {
+        key: 'pageParameter',
+        label: '上游页码参数',
+        type: 'input',
+        span: 12,
+        hidden: () => !draft?.paginationEnabled,
+        props: {
+          maxlength: 40,
+          placeholder: 'page',
+          'aria-label': `步骤 ${index + 1} 上游页码参数`
+        },
+        description:
+          draft?.paginationMode === 'offset' ? '该参数将收到 (current - 1) × size。' : undefined
+      },
+      {
+        key: 'sizeParameter',
+        label: '上游条数参数',
+        type: 'input',
+        span: 12,
+        hidden: () => !draft?.paginationEnabled,
+        props: {
+          maxlength: 40,
+          placeholder: 'size',
+          'aria-label': `步骤 ${index + 1} 上游条数参数`
+        }
+      },
+      {
+        key: 'exactCount',
+        label: '请求精确总数',
+        type: 'switch',
+        span: 24,
+        hidden: () => !draft?.paginationEnabled,
+        description: '只发送受控的 Prefer: count=exact；其他响应头不进入输出。'
+      }
+    ]
+  }
+  const pageItems = computed<FormItem[]>(() => [
+    {
+      key: 'stepKey',
+      label: '记录来源步骤',
+      type: 'select',
+      span: 12,
+      props: {
+        options: form.value.definition.steps.map((step) => ({
+          label: step.name || step.key,
+          value: step.key
+        }))
+      }
+    },
+    {
+      key: 'recordsPointer',
+      label: '记录数组 JSON Pointer',
+      type: 'input',
+      span: 12,
+      props: { maxlength: 256, placeholder: '/records' },
+      description: '相对于已解析的数据节点；留空表示根数组（如 Supabase）。'
+    },
+    {
+      key: 'totalSource',
+      label: '总数来源',
+      type: 'select',
+      span: 12,
+      props: { options: totalSourceOptions }
+    },
+    {
+      key: 'totalPointer',
+      label: '总数 JSON Pointer',
+      type: 'input',
+      span: 12,
+      hidden: () => pageDraft.value.totalSource !== 'body',
+      props: { maxlength: 256, placeholder: '/total' },
+      description: '相对于已解析的数据节点；Content-Range 模式无需填写。'
+    },
+    {
+      key: 'currentInputKey',
+      label: '当前页输入',
+      type: 'select',
+      span: 12,
+      props: { options: numberInputOptions.value, 'aria-label': '当前页输入' }
+    },
+    {
+      key: 'sizeInputKey',
+      label: '每页条数输入',
+      type: 'select',
+      span: 12,
+      props: { options: numberInputOptions.value, 'aria-label': '每页条数输入' }
+    }
+  ])
+  function pageFieldItems(index: number): FormItem[] {
+    return [
+      {
+        key: 'target',
+        label: '输出键',
+        type: 'input',
+        span: 12,
+        props: {
+          maxlength: 40,
+          placeholder: 'orderId',
+          'aria-label': `记录字段 ${index + 1} 输出键`
+        }
+      },
+      {
+        key: 'label',
+        label: '显示名称',
+        type: 'input',
+        span: 12,
+        props: {
+          maxlength: 50,
+          placeholder: '订单编号',
+          'aria-label': `记录字段 ${index + 1} 显示名称`
+        }
+      },
+      {
+        key: 'pointer',
+        label: '字段 JSON Pointer',
+        type: 'input',
+        span: 12,
+        props: { maxlength: 256, placeholder: '/id', 'aria-label': `记录字段 ${index + 1} 指针` },
+        description: '相对于单条记录；只公开列出的标量字段。'
+      },
+      {
+        key: 'type',
+        label: '字段类型',
+        type: 'select',
+        span: 12,
+        props: { options: valueTypeOptions, 'aria-label': `记录字段 ${index + 1} 类型` }
+      },
+      {
+        key: 'required',
+        label: '必填字段',
+        type: 'switch',
+        span: 24
+      }
+    ]
+  }
+  function addPageField(): void {
+    if (pageDraft.value.fields.length >= 32) return
+    pageDraft.value.fields.push({
+      target: '',
+      label: '',
+      pointer: '',
+      type: 'string',
+      required: false
+    })
+  }
+  function removePageField(index: number): void {
+    pageDraft.value.fields.splice(index, 1)
+  }
+
   function addInput(): void {
     if (form.value.definition.inputs.length >= 32) return
     form.value.definition.inputs.push({
@@ -531,7 +922,7 @@
   }
   function addStep(): void {
     if (form.value.definition.steps.length >= 8) return
-    form.value.definition.steps.push({
+    const step: InterfaceStep = {
       key: '',
       name: '',
       upstreamId: '',
@@ -541,10 +932,15 @@
       pathParams: [],
       query: [],
       body: []
-    })
+    }
+    form.value.definition.steps.push(step)
+    contractDrafts.value.push(contractDraft(step))
   }
   function removeStep(index: number): void {
-    if (form.value.definition.steps.length > 1) form.value.definition.steps.splice(index, 1)
+    if (form.value.definition.steps.length > 1) {
+      form.value.definition.steps.splice(index, 1)
+      contractDrafts.value.splice(index, 1)
+    }
   }
   function moveStep(index: number, direction: -1 | 1): void {
     const target = index + direction
@@ -554,6 +950,8 @@
     if (!current) return
     steps.splice(index, 1)
     steps.splice(target, 0, current)
+    const draft = contractDrafts.value.splice(index, 1)[0]
+    if (draft) contractDrafts.value.splice(target, 0, draft)
   }
   function selectUpstream(index: number, value: unknown): void {
     if (typeof value !== 'string') return
@@ -566,6 +964,7 @@
   function handleStepMethod(index: number): void {
     const step = form.value.definition.steps[index]
     if (step?.method === 'GET') step.body = []
+    else if (contractDrafts.value[index]) contractDrafts.value[index].paginationEnabled = false
   }
 
   function validateBindings(
@@ -592,6 +991,36 @@
         return '固定值不能超过 1024 字符'
     }
     return undefined
+  }
+  function validPointer(value: string): boolean {
+    return value.length <= 256 && /^(?:\/(?:[^~]|~[01])*)*$/.test(value)
+  }
+  function parseSuccessCodes(value: string): Array<string | number> | undefined {
+    try {
+      const parsed: unknown = JSON.parse(value)
+      if (
+        !Array.isArray(parsed) ||
+        parsed.length < 1 ||
+        parsed.length > 12 ||
+        parsed.some(
+          (item: unknown) =>
+            !(
+              (typeof item === 'string' && item.length > 0 && item.length <= 64) ||
+              (typeof item === 'number' && Number.isFinite(item))
+            )
+        )
+      )
+        return undefined
+      return parsed as Array<string | number>
+    } catch {
+      return undefined
+    }
+  }
+  function validNumberInput(key: string): boolean {
+    return form.value.definition.inputs.some(
+      (field) =>
+        field.key === key && field.location === 'query' && field.type === 'number' && field.required
+    )
   }
   function validateDefinition(): { tab: string; message: string } | undefined {
     const definition = form.value.definition
@@ -620,6 +1049,39 @@
         return { tab: 'steps', message: `步骤 ${index + 1} 的相对路径无效` }
       if (step.method === 'GET' && step.body.length)
         return { tab: 'steps', message: `步骤 ${index + 1} 的 GET 请求不能配置请求体` }
+      const contract = contractDrafts.value[index]
+      if (!contract) return { tab: 'steps', message: `步骤 ${index + 1} 的响应配置未就绪` }
+      if (contract.responseEnabled) {
+        if (!validPointer(contract.dataPointer))
+          return { tab: 'steps', message: `步骤 ${index + 1} 的数据指针不是有效 JSON Pointer` }
+        if (
+          contract.responseMode === 'business' &&
+          (!validPointer(contract.codePointer) ||
+            !contract.codePointer ||
+            !parseSuccessCodes(contract.successCodesText))
+        )
+          return { tab: 'steps', message: `步骤 ${index + 1} 的业务码指针或成功码数组无效` }
+      }
+      if (contract.paginationEnabled) {
+        if (step.method !== 'GET')
+          return { tab: 'steps', message: `步骤 ${index + 1} 只有 GET 能配置分页` }
+        if (
+          !validNumberInput(contract.currentInputKey) ||
+          !validNumberInput(contract.sizeInputKey) ||
+          contract.currentInputKey === contract.sizeInputKey
+        )
+          return { tab: 'steps', message: `步骤 ${index + 1} 需要两个不同的必填数字查询输入` }
+        if (
+          !keyPattern.test(contract.pageParameter) ||
+          !keyPattern.test(contract.sizeParameter) ||
+          contract.pageParameter === contract.sizeParameter ||
+          step.query.some(
+            (binding) =>
+              binding.target === contract.pageParameter || binding.target === contract.sizeParameter
+          )
+        )
+          return { tab: 'steps', message: `步骤 ${index + 1} 的分页参数无效或与查询映射冲突` }
+      }
       for (const [group, bindings] of [
         ['路径参数', step.pathParams],
         ['查询参数', step.query],
@@ -635,10 +1097,43 @@
         return { tab: 'steps', message: `步骤 ${index + 1} 的路径变量尚未全部绑定` }
       stepKeys.push(step.key)
     }
-    if (!definition.outputs.length || definition.outputs.length > 32)
-      return { tab: 'outputs', message: '请配置 1–32 个公开输出字段' }
-    const outputFailure = validateBindings(definition.outputs, stepKeys)
-    if (outputFailure) return { tab: 'outputs', message: `输出映射：${outputFailure}` }
+    if (outputModeForm.value.mode === 'page') {
+      const page = pageDraft.value
+      const sourceIndex = definition.steps.findIndex((step) => step.key === page.stepKey)
+      const source = contractDrafts.value[sourceIndex]
+      if (sourceIndex < 0 || !source?.paginationEnabled)
+        return { tab: 'outputs', message: '分页输出需选择已配置受控分页的步骤' }
+      if (
+        !validPointer(page.recordsPointer) ||
+        (page.totalSource === 'body' && (!page.totalPointer || !validPointer(page.totalPointer)))
+      )
+        return { tab: 'outputs', message: '记录数组或总数指针无效' }
+      if (
+        page.currentInputKey !== source.currentInputKey ||
+        page.sizeInputKey !== source.sizeInputKey ||
+        (page.totalSource === 'content-range' && !source.exactCount)
+      )
+        return { tab: 'outputs', message: '分页输出输入须与来源步骤一致；响应头总数需启用精确计数' }
+      if (!page.fields.length || page.fields.length > 32)
+        return { tab: 'outputs', message: '请配置 1–32 个记录白名单字段' }
+      const targets = new Set<string>()
+      for (const field of page.fields) {
+        if (
+          !keyPattern.test(field.target) ||
+          targets.has(field.target) ||
+          !field.label.trim() ||
+          !field.pointer ||
+          !validPointer(field.pointer)
+        )
+          return { tab: 'outputs', message: '记录字段键、名称或 JSON Pointer 无效或重复' }
+        targets.add(field.target)
+      }
+    } else {
+      if (!definition.outputs.length || definition.outputs.length > 32)
+        return { tab: 'outputs', message: '请配置 1–32 个公开输出字段' }
+      const outputFailure = validateBindings(definition.outputs, stepKeys)
+      if (outputFailure) return { tab: 'outputs', message: `输出映射：${outputFailure}` }
+    }
     return undefined
   }
 
@@ -663,13 +1158,49 @@
     saving.value = true
     saveError.value = ''
     try {
+      const definition = cloneDeep(form.value.definition)
+      definition.steps = definition.steps.map((step, index) => {
+        const draft = contractDrafts.value[index]!
+        return {
+          ...omit(step, ['responseContract', 'pagination']),
+          ...(draft.responseEnabled
+            ? {
+                responseContract: {
+                  mode: draft.responseMode,
+                  codePointer: draft.responseMode === 'business' ? draft.codePointer : '',
+                  dataPointer: draft.dataPointer,
+                  successCodes:
+                    draft.responseMode === 'business'
+                      ? (parseSuccessCodes(draft.successCodesText) ?? [])
+                      : []
+                }
+              }
+            : {}),
+          ...(draft.paginationEnabled
+            ? {
+                pagination: {
+                  mode: draft.paginationMode,
+                  currentInputKey: draft.currentInputKey,
+                  sizeInputKey: draft.sizeInputKey,
+                  pageParameter: draft.pageParameter,
+                  sizeParameter: draft.sizeParameter,
+                  exactCount: draft.exactCount
+                }
+              }
+            : {})
+        }
+      })
+      if (outputModeForm.value.mode === 'page') {
+        definition.outputs = []
+        definition.page = cloneDeep(pageDraft.value)
+      } else delete definition.page
       const input: InterfaceWriteInput = {
         ...form.value,
         code: form.value.code.trim(),
         name: form.value.name.trim(),
         description: form.value.description.trim(),
         path: form.value.path.trim(),
-        definition: form.value.definition,
+        definition,
         ...(record.value ? { version: record.value.version } : {})
       }
       if (record.value) await updateInterface(record.value.id, input)
@@ -687,6 +1218,9 @@
 
   function resetAfterClose(): void {
     form.value = initialForm()
+    contractDrafts.value = []
+    outputModeForm.value.mode = 'scalar'
+    pageDraft.value = emptyPage()
     options.value = undefined
     optionsPending.value = false
     optionsLoadError.value = ''
@@ -719,6 +1253,11 @@
           definition: cloneDeep(toRaw(current.definition))
         }
       : initialForm(applicationId, environment)
+    contractDrafts.value = form.value.definition.steps.map(contractDraft)
+    outputModeForm.value.mode = current?.definition.page ? 'page' : 'scalar'
+    pageDraft.value = current?.definition.page
+      ? cloneDeep(toRaw(current.definition.page))
+      : emptyPage()
     activeTab.value = 'basic'
     saveError.value = ''
     await nextTick()

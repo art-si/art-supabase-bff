@@ -13,6 +13,9 @@ export const BFF_DICTIONARIES = {
     validationStatus: 'bffInterfaceValidationStatus',
     inputLocation: 'bffInterfaceInputLocation',
     valueType: 'bffInterfaceValueType',
-    bindingSource: 'bffInterfaceBindingSource'
+    bindingSource: 'bffInterfaceBindingSource',
+    responseContractMode: 'bffResponseContractMode',
+    paginationMode: 'bffPaginationMode',
+    pageTotalSource: 'bffPageTotalSource'
   }
 } as const

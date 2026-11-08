@@ -209,3 +209,36 @@ test('replay payload uses a separate key and binds tenant, member, application, 
     )
   )
 })
+
+test('encrypted replay accepts bounded declared pages and rejects extra row fields', () => {
+  const actor = session()
+  const candidate = published()
+  candidate.definition.outputs = []
+  candidate.definition.page = {
+    stepKey: 'load',
+    recordsPointer: '',
+    totalSource: 'content-range',
+    totalPointer: '',
+    currentInputKey: 'current',
+    sizeInputKey: 'size',
+    fields: [{ target: 'name', label: '名称', pointer: '/name', type: 'string', required: true }]
+  }
+  const response = {
+    requestId: randomUUID(),
+    version: candidate.versionNumber,
+    code: 200 as const,
+    msg: '成功',
+    data: { records: [{ name: '示例甲' }, { name: '示例乙' }], total: 2, current: 1, size: 2 }
+  }
+  const ciphertext = sealGatewayReplay(actor, candidate, response, key)
+  assert.deepEqual(
+    openGatewayReplay(actor, candidate, response.requestId, ciphertext, key),
+    response
+  )
+  const unsafe = {
+    ...response,
+    data: { ...response.data, records: [{ name: '示例甲', secret: 'never' }] }
+  }
+  const unsafeCipher = sealGatewayReplay(actor, candidate, unsafe, key)
+  assert.throws(() => openGatewayReplay(actor, candidate, response.requestId, unsafeCipher, key))
+})

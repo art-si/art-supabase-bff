@@ -119,12 +119,28 @@ Windows 上可复用已登录的 Supabase CLI 凭据执行初始化工具，凭�
 
 ## 接口编排
 
-通过 **服务管理 → 接口编排**，声明调用参数、编排步骤与响应字段。接口按应用和环境隔离，支持 1–8 个顺序执行的 HTTP 步骤；后续步骤可通过 JSON Pointer 读取前序步骤字段。输入与映射值支持文本、数字和布尔类型，响应输出为显式声明的标量字段。
+通过 **服务管理 → 接口编排**，声明调用参数、编排步骤与响应字段。接口按应用和环境隔离，支持 1–8 个顺序执行的 HTTP 步骤；后续步骤可通过 JSON Pointer 读取前序步骤字段。响应支持显式声明的标量字段，以及含字段白名单的分页记录。
 
 - 创建和修改保存为草稿；修改后需重新验证。验证检查参数、路径占位符、步骤顺序及绑定的上游配置版本。上游配置变化后须重新选择版本并验证。
 - 试运行要求当前草稿已验证、应用及上游已启用，并通过出站策略与凭据就绪检查。总执行时限为 30 秒，前序失败时后续步骤跳过。页面展示步骤摘要和映射结果；配置或凭据在执行期间变化时，结果标为过期。
 - `BffInterface:Test` 控制普通测试；非 GET 步骤还需 `BffInterface:TestWrite`。写测试仅用于开发或预发布环境，并须配置 `BFF_INTERFACE_TEST_WRITE_ORIGINS` 为受控测试源站，同时包含在 `BFF_UPSTREAM_ALLOWED_ORIGINS` 中。生产草稿测试始终只允许 GET。
 - 上游存在接口引用时，通过共用关联检查定位接口并处理绑定，再删除上游。草稿不直接承接正式调用；正式请求使用不可变发布版本，见下方版本发布与网关。
+
+## Pro 接入与统一响应
+
+- 每个步骤可配置 HTTP 响应或业务码响应合同：声明成功码与数据 JSON Pointer。数字 `200` 和字符串 `"200"` 严格区分；HTTP 200 中的业务失败不会被当成成功，也不透传上游错误正文。
+- 分页合同声明记录位置、总数来源、页码及每页条数输入和允许输出的字段。支持页码或 offset/limit 上游，以及 PostgREST `Content-Range`；未知总数会提示合同错误，不伪造总数。每页最多 100 条、32 个字段、64 KiB。
+- 统一成功响应为 `{code:200,msg,requestId,version,data}`；分页 `data` 为 `{records,total,current,size}`。旧标量定义和不可变发布版本仍受支持。
+- Pro 公共 npm 包提供 `@/api/bff` 和完整 **BFF 接入中心**。启用 `VITE_BFF_ENABLED=true` 后，只有服务端确认当前账号具有 BFF 访问权限才贡献动态菜单；默认关闭，既有业务菜单保持原行为。
+- GitHub Pages 上的 Pro 通过已认证的 `bff-gateway` Edge Function 调用独立 BFF 服务。Edge 用 Pro `Auth.getUser` 和有效用户资料检查身份，BFF 再按固定签发者与 subject 核对自己的会员、应用及接口权限。浏览器不接收 BFF 服务密钥、上游凭据或 BFF 令牌。
+- 两侧服务端配置同一专用 32 字节 Base64 `BFF_PRO_BRIDGE_SECRET`；Pro Edge 还需 `BFF_SERVICE_URL=https://你的BFF域名` 和准确的 `BFF_PRO_ALLOWED_ORIGINS`。签名绑定请求体，60 秒过期，一次性编号在数据库防重放；浏览器 Cookie 网关的 CSRF 校验继续生效。
+- 本地演示使用 Pro 的 `pnpm bff:dev-bridge` 和同一 Edge handler，配合同源 `/__bff_bridge` 开发代理；开发 HTTP 仅允许显式本机源站。未部署独立 HTTPS 服务时，不启用线上接入。
+
+真实 HTTP 回归：`node --env-file-if-exists=.env.local --use-env-proxy --import tsx tests/integration/pro-bridge-http.ts`。该测试在隔离租户创建三种格式的受控本机上游并验证发布、两条记录、业务失败、字段过滤与跨租户拒绝，结束后清理。它使用合成身份，不能替代真实 Pro 登录验收。
+
+本地 Pro 演示需先确认 BFF 已应用 `server/database/schema.sql`，并在 BFF 服务端和 Pro 本地桥接进程设置相同的专用 `BFF_PRO_BRIDGE_SECRET`。BFF 本地环境还需显式设置 `BFF_UPSTREAM_ALLOW_LOCAL_HTTP=true`、`BFF_UPSTREAM_ALLOWED_ORIGINS=http://127.0.0.1:33445`。在 Pro 本地环境设置 `BFF_SERVICE_URL` 为本机 BFF 地址、`BFF_DEV_PROXY_TARGET=http://127.0.0.1:3037`、`VITE_BFF_ENABLED=true`、`VITE_BFF_DEV_ENDPOINT=/__bff_bridge`。启动 BFF、Pro 的 `pnpm bff:dev-bridge` 和 Pro 开发服务器后，以已开通 BFF 的统一账号登录 Pro。
+
+使用同一账号经身份中心核验的 subject UUID 设置 `BFF_DEMO_ADMIN_SUB`，运行 `node --env-file-if-exists=.env.local --use-env-proxy --import tsx scripts/pro-integration-demo.ts`。脚本再次核验其 BFF 活跃管理员成员身份，仅在本机启动受控上游，发布 Java、Supabase、CloudBase 三个两行分页示例；Pro 的 **BFF 接入中心** 可直接按目录调用。按 Ctrl+C 会停用演示应用；进程异常退出后可执行同一脚本并附 `--stop` 停用。脚本拒绝生产地址、非 BFF 数据库、缺少本机上游允许列表的环境。演示资料使用固定标记隔离，不作为生产数据。
 
 ## 版本发布与网关
 

@@ -97,10 +97,17 @@
         </ArtSectionCard>
         <ArtSectionCard
           title="已映射输出"
-          subtitle="仅显示草稿中明确声明的扁平字段"
+          subtitle="仅显示草稿中明确声明的字段；分页结果只包含白名单记录和总数。"
           preserve-content-structure
         >
-          <dl class="grid gap-2 p-3 sm:grid-cols-2">
+          <div v-if="pageOutput" class="grid min-w-0 gap-3 p-3">
+            <p class="text-sm text-g-700">
+              第 {{ pageOutput.current }} 页 · 每页 {{ pageOutput.size }} 条 · 共
+              {{ pageOutput.total }} 条
+            </p>
+            <ArtTable :data="pageOutput.records" :columns="pageColumns" :max-height="320" />
+          </div>
+          <dl v-else class="grid gap-2 p-3 sm:grid-cols-2">
             <div
               v-for="[key, value] in Object.entries(result.output)"
               :key="key"
@@ -135,10 +142,13 @@
   import type ArtForm from '@/components/core/forms/art-form/index.vue'
   import type { FormItem } from '@/components/core/forms/art-form/index.vue'
   import type { ArtDialogExpose } from '@/components/core/dialogs/art-dialog/types'
+  import ArtTable from '@/components/core/tables/art-table/index.vue'
+  import type { ColumnOption } from '@/types'
   import { BffApiError } from '@bff/api/bff'
   import { testInterface } from '@bff/api/interfaces'
   import type {
     InterfaceOptions,
+    InterfacePageResult,
     InterfaceRecord,
     InterfaceScalar,
     InterfaceTestResult
@@ -155,6 +165,20 @@
   const running = ref(false)
   const testError = ref('')
   const result = shallowRef<InterfaceTestResult>()
+  const pageOutput = computed<InterfacePageResult | undefined>(() => {
+    const output = result.value?.output
+    return output && 'records' in output && Array.isArray(output.records)
+      ? (output as InterfacePageResult)
+      : undefined
+  })
+  const pageColumns = computed<ColumnOption<Record<string, InterfaceScalar>>[]>(() =>
+    (record.value?.definition.page?.fields ?? []).map((field) => ({
+      prop: field.target,
+      label: field.label,
+      minWidth: 120,
+      formatter: (row) => (row[field.target] === null ? '空值' : String(row[field.target] ?? '—'))
+    }))
+  )
   const isWriteFlow = computed(
     () => record.value?.definition.steps.some((step) => step.method !== 'GET') ?? false
   )

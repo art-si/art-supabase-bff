@@ -6,6 +6,7 @@
   },
   "include": [
     "netlify/functions/**/*.ts",
+    "scripts/pro-integration-demo.ts",
     "server/**/*.ts",
     "tests/unit/**/*.ts",
     "tests/integration/**/*.ts",

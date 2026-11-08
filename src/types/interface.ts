@@ -33,12 +33,52 @@ export interface InterfaceStep {
   pathParams: InterfaceBinding[]
   query: InterfaceBinding[]
   body: InterfaceBinding[]
+  responseContract?: {
+    mode: 'http' | 'business'
+    codePointer: string
+    dataPointer: string
+    successCodes: Array<string | number>
+  }
+  pagination?: {
+    mode: 'page' | 'offset'
+    currentInputKey: string
+    sizeInputKey: string
+    pageParameter: string
+    sizeParameter: string
+    exactCount: boolean
+  }
+}
+
+export interface InterfacePageField {
+  target: string
+  label: string
+  pointer: string
+  type: InterfaceScalarType
+  required: boolean
+}
+
+export interface InterfacePageDefinition {
+  stepKey: string
+  recordsPointer: string
+  totalSource: 'body' | 'content-range'
+  totalPointer: string
+  currentInputKey: string
+  sizeInputKey: string
+  fields: InterfacePageField[]
+}
+
+export interface InterfacePageResult {
+  records: Array<Record<string, InterfaceScalar>>
+  total: number
+  current: number
+  size: number
 }
 
 export interface InterfaceDefinition {
   inputs: InterfaceInputField[]
   steps: InterfaceStep[]
   outputs: InterfaceBinding[]
+  page?: InterfacePageDefinition
 }
 
 export interface InterfaceWriteInput {
@@ -130,7 +170,7 @@ export interface InterfaceTestResult {
   version: number
   passed: boolean
   stale: boolean
-  output: Record<string, InterfaceScalar>
+  output: Record<string, InterfaceScalar> | InterfacePageResult
   steps: InterfaceTestStep[]
   durationMs: number
   errorClass: InterfaceErrorClass | null

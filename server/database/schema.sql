@@ -69,6 +69,20 @@ create index if not exists bff_audit_tenant_created_idx on public.bff_audit_even
 -- Control-plane records follow pro's menu/dictionary DTOs; identity stays in pro Auth.
 create unique index if not exists bff_members_id_tenant_uidx on public.bff_members(id,tenant_id);
 create unique index if not exists bff_applications_id_tenant_uidx on public.bff_applications(id,tenant_id);
+create table if not exists public.bff_pro_bridge_nonces (
+  nonce_hash text primary key check (nonce_hash ~ '^[0-9a-f]{64}$'),
+  tenant_id uuid not null,
+  member_id uuid not null,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  foreign key (member_id,tenant_id) references public.bff_members(id,tenant_id)
+);
+create index if not exists bff_pro_bridge_nonces_tenant_time_idx
+  on public.bff_pro_bridge_nonces(tenant_id,created_at desc);
+create index if not exists bff_pro_bridge_nonces_member_time_idx
+  on public.bff_pro_bridge_nonces(member_id,created_at desc);
+create index if not exists bff_pro_bridge_nonces_expiry_idx
+  on public.bff_pro_bridge_nonces(expires_at);
 alter table public.bff_application_members add column if not exists tenant_id uuid;
 update public.bff_application_members am set tenant_id=a.tenant_id from public.bff_applications a where a.id=am.application_id and am.tenant_id is null;
 alter table public.bff_application_members alter column tenant_id set not null;
@@ -171,6 +185,102 @@ create index if not exists bff_upstream_revisions_scope_idx on public.bff_upstre
 create index if not exists bff_upstream_revisions_creator_idx on public.bff_upstream_service_revisions(created_by);
 create unique index if not exists bff_upstream_service_environment_uidx on public.bff_upstream_services(id,tenant_id,application_id,environment);
 create unique index if not exists bff_upstream_revision_environment_uidx on public.bff_upstream_service_revisions(service_id,config_version,tenant_id,application_id,environment);
+create or replace function public.bff_valid_interface_definition(p_definition jsonb)
+returns boolean language plpgsql immutable security invoker set search_path='' as $$
+declare step jsonb; page jsonb; field jsonb; contract jsonb; pagination jsonb;
+begin
+  if jsonb_typeof(p_definition) is distinct from 'object' or
+    jsonb_typeof(p_definition->'inputs') is distinct from 'array' or
+    jsonb_typeof(p_definition->'steps') is distinct from 'array' or
+    jsonb_typeof(p_definition->'outputs') is distinct from 'array'
+  then return false; end if;
+  if jsonb_array_length(p_definition->'inputs')>32 or
+    jsonb_array_length(p_definition->'steps') not between 1 and 8 or
+    jsonb_array_length(p_definition->'outputs')>32
+  then return false; end if;
+  if p_definition ? 'page' then
+    page:=p_definition->'page';
+    if jsonb_typeof(page) is distinct from 'object' or
+      jsonb_array_length(p_definition->'outputs')<>0 or
+      jsonb_typeof(page->'fields') is distinct from 'array'
+    then return false; end if;
+    if not (page ?& array['stepKey','recordsPointer','totalSource','totalPointer',
+      'currentInputKey','sizeInputKey','fields']) or
+      jsonb_array_length(page->'fields') not between 1 and 32 or
+      jsonb_typeof(page->'totalSource') is distinct from 'string' or
+      page->>'totalSource' not in ('body','content-range') or
+      jsonb_typeof(page->'stepKey') is distinct from 'string' or
+      page->>'stepKey' !~ '^[A-Za-z][A-Za-z0-9_]{0,39}$' or
+      jsonb_typeof(page->'currentInputKey') is distinct from 'string' or
+      page->>'currentInputKey' !~ '^[A-Za-z][A-Za-z0-9_]{0,39}$' or
+      jsonb_typeof(page->'sizeInputKey') is distinct from 'string' or
+      page->>'sizeInputKey' !~ '^[A-Za-z][A-Za-z0-9_]{0,39}$' or
+      jsonb_typeof(page->'recordsPointer') is distinct from 'string' or
+      jsonb_typeof(page->'totalPointer') is distinct from 'string' or
+      (page->>'totalSource'='body' and page->>'totalPointer'='') or
+      length(page->>'recordsPointer')>256 or length(page->>'totalPointer')>256
+    then return false; end if;
+    for field in select value from jsonb_array_elements(page->'fields') loop
+      if jsonb_typeof(field) is distinct from 'object' or
+        not (field ?& array['target','label','pointer','type','required']) or
+        jsonb_typeof(field->'target') is distinct from 'string' or
+        field->>'target' !~ '^[A-Za-z][A-Za-z0-9_]{0,39}$' or
+        jsonb_typeof(field->'label') is distinct from 'string' or
+        length(trim(coalesce(field->>'label',''))) not between 1 and 50 or
+        jsonb_typeof(field->'pointer') is distinct from 'string' or
+        length(field->>'pointer') not between 1 and 256 or
+        jsonb_typeof(field->'type') is distinct from 'string' or
+        field->>'type' not in ('string','number','boolean') or
+        jsonb_typeof(field->'required') is distinct from 'boolean'
+      then return false; end if;
+    end loop;
+  elsif jsonb_array_length(p_definition->'outputs')<1 then return false; end if;
+  for step in select value from jsonb_array_elements(p_definition->'steps') loop
+    if jsonb_typeof(step) is distinct from 'object' then return false; end if;
+    if step ? 'responseContract' then
+      contract:=step->'responseContract';
+      if jsonb_typeof(contract) is distinct from 'object' or
+        not (contract ?& array['mode','codePointer','dataPointer','successCodes']) or
+        jsonb_typeof(contract->'mode') is distinct from 'string' or
+        contract->>'mode' not in ('http','business') or
+        jsonb_typeof(contract->'codePointer') is distinct from 'string' or
+        jsonb_typeof(contract->'dataPointer') is distinct from 'string' or
+        jsonb_typeof(contract->'successCodes') is distinct from 'array'
+      then return false; end if;
+      if length(contract->>'codePointer')>256 or length(contract->>'dataPointer')>256 or
+        jsonb_array_length(contract->'successCodes')>16 or
+        (contract->>'mode'='business' and
+          (contract->>'codePointer'='' or jsonb_array_length(contract->'successCodes')=0)) or
+        (contract->>'mode'='http' and jsonb_array_length(contract->'successCodes')<>0) or
+        exists(select 1 from jsonb_array_elements(contract->'successCodes') as code(value)
+          where jsonb_typeof(code.value) not in ('string','number') or
+            length(code.value::text)>82)
+      then return false; end if;
+    end if;
+    if step ? 'pagination' then
+      pagination:=step->'pagination';
+      if jsonb_typeof(pagination) is distinct from 'object' or
+        not (pagination ?& array['mode','currentInputKey','sizeInputKey',
+          'pageParameter','sizeParameter','exactCount']) or
+        jsonb_typeof(pagination->'mode') is distinct from 'string' or
+        pagination->>'mode' not in ('page','offset') or
+        jsonb_typeof(pagination->'exactCount') is distinct from 'boolean' or
+        step->>'method' is distinct from 'GET' or
+        jsonb_typeof(pagination->'currentInputKey') is distinct from 'string' or
+        pagination->>'currentInputKey' !~ '^[A-Za-z][A-Za-z0-9_]{0,39}$' or
+        jsonb_typeof(pagination->'sizeInputKey') is distinct from 'string' or
+        pagination->>'sizeInputKey' !~ '^[A-Za-z][A-Za-z0-9_]{0,39}$' or
+        jsonb_typeof(pagination->'pageParameter') is distinct from 'string' or
+        pagination->>'pageParameter' !~ '^[A-Za-z][A-Za-z0-9_]{0,39}$' or
+        jsonb_typeof(pagination->'sizeParameter') is distinct from 'string' or
+        pagination->>'sizeParameter' !~ '^[A-Za-z][A-Za-z0-9_]{0,39}$'
+      then return false; end if;
+    end if;
+  end loop;
+  return true;
+end $$;
+revoke all on function public.bff_valid_interface_definition(jsonb) from public,anon,authenticated;
+grant execute on function public.bff_valid_interface_definition(jsonb) to service_role;
 create table if not exists public.bff_interfaces (
   id uuid primary key,
   tenant_id uuid not null,
@@ -181,11 +291,7 @@ create table if not exists public.bff_interfaces (
   description text not null default '' check (length(description)<=1000),
   method text not null check (method in ('GET','POST','PUT','PATCH','DELETE')),
   path text not null check (length(path) between 1 and 500 and left(path,1)='/' and left(path,2)<>'//' and path !~ '[[:cntrl:]?#\\]'),
-  definition jsonb not null check (case when jsonb_typeof(definition)='object' and
-    jsonb_typeof(definition->'inputs')='array' and jsonb_typeof(definition->'steps')='array' and
-    jsonb_typeof(definition->'outputs')='array' then
-      jsonb_array_length(definition->'inputs')<=32 and jsonb_array_length(definition->'steps') between 1 and 8 and
-      jsonb_array_length(definition->'outputs') between 1 and 32 else false end),
+  definition jsonb not null check (public.bff_valid_interface_definition(definition)),
   version integer not null default 1 check (version>0),
   validation_status text not null default 'unvalidated' check (validation_status in ('unvalidated','valid','invalid')),
   validated_version integer check (validated_version>0),
@@ -205,6 +311,9 @@ create table if not exists public.bff_interfaces (
   foreign key (created_by,tenant_id) references public.bff_members(id,tenant_id),
   foreign key (updated_by,tenant_id) references public.bff_members(id,tenant_id)
 );
+alter table public.bff_interfaces drop constraint if exists bff_interfaces_definition_check;
+alter table public.bff_interfaces add constraint bff_interfaces_definition_check
+  check (public.bff_valid_interface_definition(definition));
 create unique index if not exists bff_interface_code_uidx on public.bff_interfaces(tenant_id,application_id,environment,code) where deleted_at is null;
 create unique index if not exists bff_interface_route_uidx on public.bff_interfaces(tenant_id,application_id,environment,method,path) where deleted_at is null;
 create index if not exists bff_interface_scope_idx on public.bff_interfaces(tenant_id,application_id,environment,created_at desc,id) where deleted_at is null;
@@ -254,6 +363,9 @@ create table if not exists public.bff_interface_versions (
     references public.bff_interfaces(id,tenant_id,application_id,environment),
   foreign key (created_by,tenant_id) references public.bff_members(id,tenant_id)
 );
+alter table public.bff_interface_versions drop constraint if exists bff_interface_versions_definition_check;
+alter table public.bff_interface_versions add constraint bff_interface_versions_definition_check
+  check (public.bff_valid_interface_definition(definition));
 create index if not exists bff_interface_versions_scope_idx
   on public.bff_interface_versions(tenant_id,application_id,interface_id,number desc);
 create index if not exists bff_interface_versions_creator_idx on public.bff_interface_versions(created_by);
@@ -2639,12 +2751,8 @@ begin
     if jsonb_typeof(p_definition) is distinct from 'object' or jsonb_typeof(p_definition->'definition') is distinct from 'object'
       then raise exception 'BFF_INVALID_DEFINITION'; end if;
     details:=p_definition->'definition';
-    if jsonb_typeof(details->'inputs') is distinct from 'array' or
-      jsonb_typeof(details->'steps') is distinct from 'array' or
-      jsonb_typeof(details->'outputs') is distinct from 'array'
-      then raise exception 'BFF_INVALID_DEFINITION'; end if;
-    if jsonb_array_length(details->'inputs')>32 or jsonb_array_length(details->'steps') not between 1 and 8 or
-      jsonb_array_length(details->'outputs') not between 1 and 32 or
+    if not public.bff_valid_interface_definition(details) then raise exception 'BFF_INVALID_DEFINITION'; end if;
+    if
       exists(select 1 from jsonb_array_elements(details->'steps') as entry(value) where
         jsonb_typeof(entry.value) is distinct from 'object' or entry.value->>'key' !~ '^[A-Za-z][A-Za-z0-9_-]{0,63}$') or
       exists(select 1 from jsonb_array_elements(details->'steps') as entry(value)
@@ -4100,6 +4208,82 @@ grant execute on function public.bff_release_scope(uuid,uuid,text),public.bff_re
   public.bff_gateway_begin(uuid,uuid,uuid,integer,uuid,text,text),
   public.bff_gateway_finish(uuid,uuid,boolean,integer,integer,text,jsonb,text,jsonb,text)
   to service_role;
+create or replace function public.bff_consume_pro_bridge_nonce(
+  p_actor uuid,p_nonce_hash text,p_expires_at timestamptz)
+returns boolean language plpgsql security invoker set search_path='' as $$
+declare actor public.bff_members; inserted integer;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled and
+    issuer='https://ckbftoopuyophiebamwy.supabase.co/auth/v1';
+  if actor.id is null then raise exception 'BFF_FORBIDDEN'; end if;
+  if p_nonce_hash is null or p_nonce_hash !~ '^[0-9a-f]{64}$' or p_expires_at is null or
+    p_expires_at<=now() or p_expires_at>now()+interval '90 seconds'
+  then raise exception 'BFF_BRIDGE_INVALID_NONCE'; end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-pro-bridge:'||actor.tenant_id::text,0));
+  perform 1 from public.bff_members where id=actor.id and tenant_id=actor.tenant_id and enabled for share;
+  if not found then raise exception 'BFF_FORBIDDEN'; end if;
+  delete from public.bff_pro_bridge_nonces where nonce_hash in
+    (select nonce_hash from public.bff_pro_bridge_nonces where expires_at<now()
+      order by expires_at,nonce_hash limit 200);
+  if (select count(*) from public.bff_pro_bridge_nonces where tenant_id=actor.tenant_id and
+    created_at>now()-interval '1 minute')>=600 or
+    (select count(*) from public.bff_pro_bridge_nonces where member_id=actor.id and
+      created_at>now()-interval '1 minute')>=120
+  then raise exception 'BFF_BRIDGE_RATE_LIMIT'; end if;
+  insert into public.bff_pro_bridge_nonces(nonce_hash,tenant_id,member_id,expires_at)
+    values(p_nonce_hash,actor.tenant_id,actor.id,p_expires_at) on conflict do nothing;
+  get diagnostics inserted=row_count;
+  if inserted<>1 then raise exception 'BFF_BRIDGE_REPLAY'; end if;
+  return true;
+end $$;
+create or replace function public.bff_pro_consumer_catalog(p_actor uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; result jsonb;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled and
+    issuer='https://ckbftoopuyophiebamwy.supabase.co/auth/v1';
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffInterface:Invoke')
+  then raise exception 'BFF_FORBIDDEN'; end if;
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'interfaceId',catalog.interface_id,'code',catalog.code,'name',catalog.name,
+    'method',catalog.method,'path',catalog.path,'environment',catalog.environment,
+    'version',catalog.number,'applicationCode',catalog.application_code,
+    'applicationName',catalog.application_name,
+    'inputs',catalog.inputs,'resultKind',catalog.result_kind,'outputs',catalog.outputs,
+    'pagination',catalog.pagination)
+    order by catalog.application_code,catalog.environment,catalog.path,catalog.method,catalog.interface_id),'[]'::jsonb)
+    into result from (
+      select d.interface_id,i.code,i.name,d.method,d.path,d.environment,v.number,
+        a.code as application_code,a.name as application_name,
+        (select coalesce(jsonb_agg(jsonb_build_object('key',f.value->>'key',
+          'label',f.value->>'label','location',f.value->>'location',
+          'type',f.value->>'type','required',f.value->'required') order by f.ordinality),'[]'::jsonb)
+          from jsonb_array_elements(v.definition->'inputs') with ordinality as f(value,ordinality)) as inputs,
+        case when v.definition ? 'page' then 'page' else 'scalar' end as result_kind,
+        case when v.definition ? 'page' then jsonb_build_object(
+          'currentInputKey',v.definition->'page'->>'currentInputKey',
+          'sizeInputKey',v.definition->'page'->>'sizeInputKey') else null end as pagination,
+        (select coalesce(jsonb_agg(jsonb_build_object('key',f.value->>'target',
+          'label',case when v.definition ? 'page' then f.value->>'label' else f.value->>'target' end,
+          'type',case when v.definition ? 'page' then f.value->>'type' else null end)
+          order by f.ordinality),'[]'::jsonb)
+          from jsonb_array_elements(case when v.definition ? 'page' then v.definition->'page'->'fields'
+            else v.definition->'outputs' end) with ordinality as f(value,ordinality)) as outputs
+      from public.bff_interface_deployments d
+      join public.bff_interfaces i on i.id=d.interface_id and i.tenant_id=actor.tenant_id and i.deleted_at is null
+      join public.bff_interface_versions v on v.id=d.active_version_id and v.interface_id=d.interface_id
+        and v.tenant_id=actor.tenant_id
+      join public.bff_applications a on a.id=d.application_id and a.tenant_id=actor.tenant_id and a.enabled
+      where d.tenant_id=actor.tenant_id and d.enabled and
+        public.bff_gateway_scope(p_actor,d.application_id,d.method)
+      order by a.code,d.environment,d.path,d.method,d.interface_id limit 500
+    ) catalog;
+  return result;
+end $$;
+revoke all on function public.bff_consume_pro_bridge_nonce(uuid,text,timestamptz),
+  public.bff_pro_consumer_catalog(uuid) from public,anon,authenticated;
+grant execute on function public.bff_consume_pro_bridge_nonce(uuid,text,timestamptz),
+  public.bff_pro_consumer_catalog(uuid) to service_role;
 revoke all on function public.bff_call_public(uuid),public.bff_call_window(jsonb),
   public.bff_read_calls(uuid,jsonb),public.bff_call_detail(uuid,uuid),public.bff_call_options(uuid),
   public.bff_alert_rule_public(uuid),public.bff_alert_instance_public(uuid),
@@ -4123,10 +4307,13 @@ alter table public.bff_applications enable row level security;
 alter table public.bff_application_members enable row level security;
 alter table public.bff_auth_transactions enable row level security;
 alter table public.bff_sessions enable row level security;
+alter table public.bff_pro_bridge_nonces enable row level security;
 alter table public.bff_audit_events enable row level security;
 revoke all on public.bff_members,public.bff_applications,public.bff_application_members,public.bff_auth_transactions,public.bff_sessions,public.bff_audit_events from anon,authenticated;
 revoke all on public.bff_members,public.bff_applications,public.bff_application_members,public.bff_auth_transactions,public.bff_sessions,public.bff_audit_events from service_role;
 grant select,insert,update,delete on public.bff_members,public.bff_applications,public.bff_application_members,public.bff_auth_transactions,public.bff_sessions,public.bff_audit_events to service_role;
+revoke all on public.bff_pro_bridge_nonces from public,anon,authenticated,service_role;
+grant select,insert,delete on public.bff_pro_bridge_nonces to service_role;
 alter table public.bff_upstream_services enable row level security;
 alter table public.bff_upstream_credentials enable row level security;
 alter table public.bff_upstream_service_revisions enable row level security;
@@ -4213,7 +4400,10 @@ begin
       ('bffInterfaceValidationStatus','接口验证状态','BffInterfaceManagement'),
       ('bffInterfaceInputLocation','接口输入位置','BffInterfaceManagement'),
       ('bffInterfaceValueType','接口字段类型','BffInterfaceManagement'),
-      ('bffInterfaceBindingSource','接口映射来源','BffInterfaceManagement')
+      ('bffInterfaceBindingSource','接口映射来源','BffInterfaceManagement'),
+      ('bffResponseContractMode','响应判定方式','BffInterfaceManagement'),
+      ('bffPaginationMode','分页请求方式','BffInterfaceManagement'),
+      ('bffPageTotalSource','分页总数来源','BffInterfaceManagement')
     ) as types(code,name,directory) loop
       select id into parent from public.bff_dictionary_types
         where tenant_id=actor.tenant_id and node_type='directory' and code=entry.directory;
@@ -4267,7 +4457,13 @@ begin
       ('bffInterfaceValueType','boolean','布尔值',3,'info'),
       ('bffInterfaceBindingSource','input','接口输入',1,'primary'),
       ('bffInterfaceBindingSource','step','前序步骤',2,'success'),
-      ('bffInterfaceBindingSource','literal','固定值',3,'info')
+      ('bffInterfaceBindingSource','literal','固定值',3,'info'),
+      ('bffResponseContractMode','http','传输成功提取',1,'info'),
+      ('bffResponseContractMode','business','业务码判定',2,'primary'),
+      ('bffPaginationMode','page','页码 + 页长',1,'info'),
+      ('bffPaginationMode','offset','偏移 + 页长',2,'primary'),
+      ('bffPageTotalSource','body','响应数据',1,'info'),
+      ('bffPageTotalSource','content-range','Content-Range',2,'primary')
     ) as options(code,value,label,sort,tag) loop
       select id into dictionary from public.bff_dictionary_types
         where tenant_id=actor.tenant_id and node_type='dictionary' and code=option.code;

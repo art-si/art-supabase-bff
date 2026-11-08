@@ -47,7 +47,8 @@ import {
   releaseReadiness,
   writeRelease
 } from './releases'
-import { handleGateway } from './gateway'
+import { handleBridgeGateway, handleGateway } from './gateway'
+import { authenticateProBridge } from './pro-bridge'
 import { brandingDto, readBranding, writeBranding } from './branding'
 import { generateBrandWordmark } from './wordmark'
 import {
@@ -100,7 +101,9 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
           'resources',
           'releases',
           'calls',
-          'alerts'
+          'alerts',
+          'response-contracts',
+          'pro-integration'
         ]
       })
       return
@@ -116,6 +119,12 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     if (url.pathname === '/api/auth/logout' && req.method === 'POST') {
       await logout(req, res)
       json(res, { signedOut: true })
+      return
+    }
+    if (url.pathname === '/api/integrations/pro') {
+      if (req.method !== 'POST') throw new HttpError(405, 'Pro 接入仅支持 POST 请求')
+      const bridge = await authenticateProBridge(req)
+      await handleBridgeGateway(req, res, bridge.member, bridge.invocation, randomUUID())
       return
     }
     const session = await authenticate(req)
@@ -508,6 +517,9 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       {
         code: known ? error.code : 'INTERNAL_ERROR',
         message: known ? error.message : '服务暂时不可用，请稍后重试',
+        ...(url.pathname === '/api/integrations/pro'
+          ? { msg: known ? error.message : '服务暂时不可用，请稍后重试' }
+          : {}),
         ...(requestId ? { requestId } : {})
       },
       known ? error.status : 500

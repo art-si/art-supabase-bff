@@ -4,7 +4,7 @@ import { escapeRegExp } from 'lodash-es'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 import type { InterfaceInputField, InterfaceScalar } from '../src/types/interface'
 import type { GatewayResponse, PublishedExecution } from '../src/types/release'
-import { requireMutation, type Session } from './auth'
+import { requireMutation, type Member, type Session } from './auth'
 import { config } from './config'
 import { database } from './database/client'
 import { interfaceInput, parseInterfaceSample } from './interface-definition'
@@ -204,11 +204,11 @@ function replayKey(encodedSessionKey: string): string {
   ).toString('base64')
 }
 
-function replayAad(session: Session, published: PublishedExecution, requestId: string): string {
+function replayAad(member: Member, published: PublishedExecution, requestId: string): string {
   return JSON.stringify({
     purpose: 'bff-gateway-replay-v1',
-    tenantId: session.member.tenant_id,
-    memberId: session.member.id,
+    tenantId: member.tenant_id,
+    memberId: member.id,
     applicationId: published.applicationId,
     requestId,
     versionId: published.versionId,
@@ -222,7 +222,16 @@ export function sealGatewayReplay(
   result: GatewayResponse,
   encodedSessionKey = config.sessionKey
 ): string {
-  return seal(result, replayKey(encodedSessionKey), replayAad(session, published, result.requestId))
+  return sealGatewayReplayForMember(session.member, published, result, encodedSessionKey)
+}
+
+function sealGatewayReplayForMember(
+  member: Member,
+  published: PublishedExecution,
+  result: GatewayResponse,
+  encodedSessionKey = config.sessionKey
+): string {
+  return seal(result, replayKey(encodedSessionKey), replayAad(member, published, result.requestId))
 }
 
 export function openGatewayReplay(
@@ -232,10 +241,26 @@ export function openGatewayReplay(
   ciphertext: string,
   encodedSessionKey = config.sessionKey
 ): GatewayResponse {
+  return openGatewayReplayForMember(
+    session.member,
+    published,
+    requestId,
+    ciphertext,
+    encodedSessionKey
+  )
+}
+
+function openGatewayReplayForMember(
+  member: Member,
+  published: PublishedExecution,
+  requestId: string,
+  ciphertext: string,
+  encodedSessionKey = config.sessionKey
+): GatewayResponse {
   const value: unknown = unseal(
     ciphertext,
     replayKey(encodedSessionKey),
-    replayAad(session, published, requestId)
+    replayAad(member, published, requestId)
   )
   if (
     !isObjectRecord(value) ||
@@ -244,20 +269,61 @@ export function openGatewayReplay(
     !isObjectRecord(value.data)
   )
     throw new Error('Invalid gateway replay')
-  const data: Record<string, InterfaceScalar> = {}
-  for (const [key, item] of Object.entries(value.data)) {
+  const scalar = (item: unknown): item is InterfaceScalar =>
+    item === null ||
+    typeof item === 'boolean' ||
+    (typeof item === 'number' && Number.isFinite(item) && Math.abs(item) <= 1e12) ||
+    (typeof item === 'string' && item.length <= 1024)
+  let data: GatewayResponse['data']
+  if (published.definition.page) {
+    const page = value.data
+    const fields = published.definition.page.fields.map((field) => field.target)
     if (
-      !/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) ||
-      (item !== null &&
-        typeof item !== 'string' &&
-        typeof item !== 'boolean' &&
-        typeof item !== 'number') ||
-      (typeof item === 'number' && !Number.isFinite(item))
+      !Array.isArray(page.records) ||
+      page.records.length > 100 ||
+      !Number.isSafeInteger(page.total) ||
+      typeof page.total !== 'number' ||
+      page.total < 0 ||
+      page.total > 1e12 ||
+      !Number.isSafeInteger(page.current) ||
+      typeof page.current !== 'number' ||
+      page.current < 1 ||
+      page.current > 1_000_000 ||
+      !Number.isSafeInteger(page.size) ||
+      typeof page.size !== 'number' ||
+      page.size < 1 ||
+      page.size > 100 ||
+      Object.keys(page).some((key) => !['records', 'total', 'current', 'size'].includes(key)) ||
+      page.records.some(
+        (row: unknown) =>
+          !isObjectRecord(row) ||
+          Object.keys(row).length !== fields.length ||
+          Object.keys(row).some((key) => !fields.includes(key) || !scalar(row[key]))
+      ) ||
+      Buffer.byteLength(JSON.stringify(page), 'utf8') > 64 * 1024
     )
-      throw new Error('Invalid gateway replay data')
-    data[key] = item
+      throw new Error('Invalid gateway replay page')
+    data = page as GatewayResponse['data']
+  } else {
+    if (Object.keys(value.data).length > 32) throw new Error('Invalid gateway replay data')
+    const mapped: Record<string, InterfaceScalar> = {}
+    for (const [key, item] of Object.entries(value.data)) {
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) || !scalar(item))
+        throw new Error('Invalid gateway replay data')
+      mapped[key] = item
+    }
+    data = mapped
   }
-  return { requestId, version: published.versionNumber, data }
+  if (value.code !== undefined && value.code !== 200) throw new Error('Invalid gateway replay code')
+  if (value.msg !== undefined && value.msg !== '成功')
+    throw new Error('Invalid gateway replay message')
+  return {
+    requestId,
+    version: published.versionNumber,
+    data,
+    ...(value.code === 200 ? { code: 200 as const } : {}),
+    ...(value.msg === '成功' ? { msg: '成功' } : {})
+  }
 }
 
 function publishedExecution(value: unknown): PublishedExecution {
@@ -418,6 +484,111 @@ export function gatewayStepCode(code: string | null): string | null {
   return /^[A-Z][A-Z0-9_]{0,79}$/.test(normalized) ? normalized : 'STEP_FAILED'
 }
 
+export type ProBridgeInvocation =
+  | { operation: 'catalog' }
+  | {
+      operation: 'invoke'
+      applicationCode: string
+      environment: 'development' | 'staging' | 'production'
+      path: string
+      method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+      query: Record<string, InterfaceScalar>
+      body: Record<string, InterfaceScalar>
+      idempotencyKey?: string
+    }
+
+function bridgeRequest(value: ProBridgeInvocation): {
+  route: ReturnType<typeof parseGatewayRoute>
+  supplied: Record<string, unknown>
+  idempotencyKey: string | undefined
+} {
+  if (
+    value.operation !== 'invoke' ||
+    typeof value.path !== 'string' ||
+    !appCodePattern.test(value.applicationCode) ||
+    !['development', 'staging', 'production'].includes(value.environment) ||
+    !['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(value.method) ||
+    !isObjectRecord(value.query) ||
+    !isObjectRecord(value.body) ||
+    Object.keys(value.query).length > 32 ||
+    Object.keys(value.body).length > 32 ||
+    (value.idempotencyKey !== undefined &&
+      (typeof value.idempotencyKey !== 'string' || !uuidPattern.test(value.idempotencyKey))) ||
+    (value.method === 'GET' && Object.keys(value.body).length > 0)
+  )
+    throw new HttpError(400, '桥接调用内容格式有误', 'INVALID_INPUT')
+  pathSegments(value.path)
+  const query = new URLSearchParams()
+  for (const [key, item] of Object.entries(value.query)) {
+    if (
+      !/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) ||
+      (item !== null &&
+        typeof item !== 'string' &&
+        typeof item !== 'number' &&
+        typeof item !== 'boolean') ||
+      (typeof item === 'number' && (!Number.isFinite(item) || Math.abs(item) > 1e12)) ||
+      (typeof item === 'string' && item.length > 1024)
+    )
+      throw new HttpError(400, '桥接查询参数格式有误', 'INVALID_INPUT')
+    query.append(key, item === null ? '' : String(item))
+  }
+  for (const [key, item] of Object.entries(value.body)) {
+    if (
+      !/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) ||
+      (item !== null &&
+        typeof item !== 'string' &&
+        typeof item !== 'number' &&
+        typeof item !== 'boolean') ||
+      (typeof item === 'number' && (!Number.isFinite(item) || Math.abs(item) > 1e12)) ||
+      (typeof item === 'string' && item.length > 1024)
+    )
+      throw new HttpError(400, '桥接请求体格式有误', 'INVALID_INPUT')
+  }
+  return {
+    route: {
+      appCode: value.applicationCode,
+      environment: value.environment,
+      path: value.path,
+      method: value.method,
+      query
+    },
+    supplied: value.body,
+    idempotencyKey: value.idempotencyKey
+  }
+}
+
+/** Validate signed JSON payload without trusting TypeScript claims from the Edge caller. */
+export function parseProBridgeInvocation(value: unknown): ProBridgeInvocation {
+  if (!isObjectRecord(value)) throw new HttpError(400, '桥接调用内容格式有误', 'INVALID_INPUT')
+  if (value.operation === 'catalog') {
+    if (Object.keys(value).length !== 1)
+      throw new HttpError(400, '接口目录请求不能包含其他参数', 'INVALID_INPUT')
+    return { operation: 'catalog' }
+  }
+  if (
+    value.operation !== 'invoke' ||
+    Object.keys(value).some(
+      (key) =>
+        ![
+          'operation',
+          'applicationCode',
+          'environment',
+          'path',
+          'method',
+          'query',
+          'body',
+          'idempotencyKey'
+        ].includes(key)
+    )
+  )
+    throw new HttpError(400, '桥接调用内容格式有误', 'INVALID_INPUT')
+  const invocation = value as ProBridgeInvocation
+  bridgeRequest(invocation)
+  return invocation
+}
+
+type GatewayPrincipal = { kind: 'cookie'; session: Session } | { kind: 'bridge'; member: Member }
+
 /** Always responds with a server request ID. The caller has already authenticated the BFF session. */
 export async function handleGateway(
   req: IncomingMessage,
@@ -426,19 +597,74 @@ export async function handleGateway(
   _url: URL,
   initialRequestId: string
 ): Promise<void> {
+  await gatewayCore(req, res, { kind: 'cookie', session }, undefined, initialRequestId)
+}
+
+/** The caller must verify the signed pro assertion and consume its nonce first. */
+export async function handleBridgeGateway(
+  req: IncomingMessage,
+  res: ServerResponse,
+  member: Member,
+  invocation: ProBridgeInvocation,
+  requestId: string
+): Promise<void> {
+  if (invocation.operation === 'catalog') {
+    res.setHeader('X-Request-Id', requestId)
+    try {
+      const result = await database.rpc(
+        'bff_pro_consumer_catalog',
+        { p_actor: member.id },
+        { get: true }
+      )
+      rpcFailure(result.error)
+      if (
+        !Array.isArray(result.data) ||
+        result.data.length > 500 ||
+        Buffer.byteLength(JSON.stringify(result.data), 'utf8') > 2 * 1024 * 1024
+      )
+        throw new HttpError(503, '接口目录暂不可用', 'GATEWAY_UNAVAILABLE')
+      json(res, { records: result.data })
+    } catch (error) {
+      const known = error instanceof HttpError
+      const message = known ? error.message : '接口目录暂不可用，请稍后重试'
+      json(
+        res,
+        { code: known ? error.code : 'GATEWAY_UNAVAILABLE', message, msg: message, requestId },
+        known ? error.status : 503
+      )
+    }
+    return
+  }
+  await gatewayCore(req, res, { kind: 'bridge', member }, invocation, requestId)
+}
+
+async function gatewayCore(
+  req: IncomingMessage,
+  res: ServerResponse,
+  principal: GatewayPrincipal,
+  invocation: ProBridgeInvocation | undefined,
+  initialRequestId: string
+): Promise<void> {
+  const member = principal.kind === 'cookie' ? principal.session.member : principal.member
   let requestId = uuidPattern.test(initialRequestId) ? initialRequestId : randomUUID()
   let writeStarted = false
   res.setHeader('X-Request-Id', requestId)
   try {
-    const route = parseGatewayRoute(req)
-    if (route.method !== 'GET') requireMutation(req, session)
-    const idempotencyKey = req.headers['idempotency-key']
+    const bridged = principal.kind === 'bridge' && invocation ? bridgeRequest(invocation) : null
+    if (principal.kind === 'bridge' && !bridged)
+      throw new HttpError(400, '桥接调用内容格式有误', 'INVALID_INPUT')
+    const route = bridged?.route ?? parseGatewayRoute(req)
+    if (principal.kind === 'cookie' && route.method !== 'GET')
+      requireMutation(req, principal.session)
+    const idempotencyKey =
+      principal.kind === 'bridge' ? bridged?.idempotencyKey : req.headers['idempotency-key']
     if (
       route.method !== 'GET' &&
       (typeof idempotencyKey !== 'string' || !uuidPattern.test(idempotencyKey))
     )
       throw new HttpError(400, '写请求须提供 UUID 格式的 Idempotency-Key', 'INVALID_INPUT')
     if (
+      principal.kind === 'cookie' &&
       route.method === 'GET' &&
       (req.headers['transfer-encoding'] || Number(req.headers['content-length'] || 0) > 0)
     )
@@ -446,7 +672,7 @@ export async function handleGateway(
     const candidates = await database.rpc(
       'bff_gateway_candidates',
       {
-        p_actor: session.member.id,
+        p_actor: member.id,
         p_app_code: route.appCode,
         p_environment: route.environment,
         p_method: route.method,
@@ -468,7 +694,7 @@ export async function handleGateway(
       const authorized = await database.rpc(
         'bff_actor_can',
         {
-          p_actor: session.member.id,
+          p_actor: member.id,
           p_permission: 'BffInterface:InvokeWrite'
         },
         { get: true }
@@ -476,20 +702,18 @@ export async function handleGateway(
       rpcFailure(authorized.error)
       if (authorized.data !== true) throw new HttpError(403, '当前账号没有写调用权限', 'FORBIDDEN')
     }
-    const supplied = await readGatewayBody(req, route.method)
+    const supplied = bridged?.supplied ?? (await readGatewayBody(req, route.method))
     const input = parseGatewayInput(execution, selected.pathParams, route.query, supplied)
     const inputHash = gatewayInputHash(execution, input)
     const idempotencyHash =
       route.method === 'GET' || typeof idempotencyKey !== 'string'
         ? null
-        : digest(
-            `${session.member.tenant_id}\0${session.member.id}\0${idempotencyKey.toLowerCase()}`
-          )
+        : digest(`${member.tenant_id}\0${member.id}\0${idempotencyKey.toLowerCase()}`)
     const beginAttemptAt = Date.now()
     const executionDeadline = beginAttemptAt + 30_000
     const begunResult = await database
       .rpc('bff_gateway_begin', {
-        p_actor: session.member.id,
+        p_actor: member.id,
         p_interface: execution.interfaceId,
         p_version_id: execution.versionId,
         p_deployment_version: execution.deploymentVersion,
@@ -507,7 +731,12 @@ export async function handleGateway(
     if (begun.kind === 'running') {
       json(
         res,
-        { code: 'IN_PROGRESS', message: '相同请求正在执行，请稍后查询结果', requestId },
+        {
+          code: 'IN_PROGRESS',
+          message: '相同请求正在执行，请稍后查询结果',
+          msg: '相同请求正在执行，请稍后查询结果',
+          requestId
+        },
         202
       )
       return
@@ -519,7 +748,7 @@ export async function handleGateway(
         throw new HttpError(503, '历史调用结果暂不可用，请联系管理员', 'REPLAY_UNAVAILABLE')
       let replay: GatewayResponse
       try {
-        replay = openGatewayReplay(session, execution, requestId, begun.resultPayload)
+        replay = openGatewayReplayForMember(member, execution, requestId, begun.resultPayload)
       } catch {
         throw new HttpError(503, '历史调用结果暂不可用，请联系管理员', 'REPLAY_UNAVAILABLE')
       }
@@ -544,7 +773,7 @@ export async function handleGateway(
         .rpc(
           'bff_gateway_step_targets',
           {
-            p_actor: session.member.id,
+            p_actor: member.id,
             p_interface: execution.interfaceId,
             p_version_id: execution.versionId,
             p_deployment_version: execution.deploymentVersion,
@@ -563,7 +792,7 @@ export async function handleGateway(
         byKey.set(item.stepKey, item)
       }
       return steps.map((step) => {
-        const target = decodePublishedTarget(session.member, execution, step, byKey.get(step.key))
+        const target = decodePublishedTarget(member, execution, step, byKey.get(step.key))
         const previous = observations.get(target.observed.id)
         if (previous && !sameObservation(previous, target.observed))
           throw new HttpError(409, '上游配置或凭据已变化，本次调用结果不可确认', 'UPSTREAM_CHANGED')
@@ -599,12 +828,14 @@ export async function handleGateway(
     const gatewayResponse: GatewayResponse = {
       requestId,
       version: execution.versionNumber,
+      code: 200,
+      msg: '成功',
       data: executionResult.output
     }
     const status = passed ? 200 : 502
     const finished = await database
       .rpc('bff_gateway_finish', {
-        p_actor: session.member.id,
+        p_actor: member.id,
         p_request_id: requestId,
         p_success: passed,
         p_http_status: status,
@@ -618,7 +849,9 @@ export async function handleGateway(
           statusCode: step.statusCode,
           durationMs: step.durationMs
         })),
-        p_result_payload: passed ? sealGatewayReplay(session, execution, gatewayResponse) : null,
+        p_result_payload: passed
+          ? sealGatewayReplayForMember(member, execution, gatewayResponse)
+          : null,
         p_upstream_versions: [...observations.values()],
         p_error_class: passed ? null : (executionResult.errorClass ?? 'unknown')
       })
@@ -634,15 +867,17 @@ export async function handleGateway(
   } catch (error) {
     const known = error instanceof HttpError
     const resultUnknown = writeStarted
+    const message = resultUnknown
+      ? '上游可能已执行，请根据请求编号核对结果后再操作'
+      : known
+        ? error.message
+        : '网关暂时无法完成调用，请稍后重试'
     json(
       res,
       {
         code: resultUnknown ? 'RESULT_UNKNOWN' : known ? error.code : 'GATEWAY_UNAVAILABLE',
-        message: resultUnknown
-          ? '上游可能已执行，请根据请求编号核对结果后再操作'
-          : known
-            ? error.message
-            : '网关暂时无法完成调用，请稍后重试',
+        message,
+        msg: message,
         requestId
       },
       resultUnknown ? 409 : known ? error.status : 503

@@ -69,6 +69,7 @@ export const config = {
   databaseUrl: env.BFF_SUPABASE_URL || '',
   databaseKey: env.BFF_SUPABASE_SERVICE_KEY || '',
   identityDirectoryKey: env.BFF_IDENTITY_DIRECTORY_SERVICE_KEY || '',
+  proBridgeSecret: env.BFF_PRO_BRIDGE_SECRET || '',
   credentialKeys: env.BFF_CREDENTIAL_KEYS || '{}',
   credentialKeyId: env.BFF_CREDENTIAL_KEY_ID || 'v1',
   upstreamAllowedOrigins: env.BFF_UPSTREAM_ALLOWED_ORIGINS || '',

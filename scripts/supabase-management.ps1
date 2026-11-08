@@ -101,9 +101,23 @@ if ($Action -eq 'InspectAuthorization') {
   exit
 }
 function Invoke-BffQuery([string]$Query) {
-  $taskBody = [Text.Encoding]::UTF8.GetBytes((@{query=$Query} | ConvertTo-Json -Compress))
-  $taskResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "https://api.supabase.com/v1/projects/$bffRef/database/query" -Headers $taskHeaders -ContentType 'application/json; charset=utf-8' -Body $taskBody
-  return (Read-Utf8JsonResponse $taskResponse)
+  if ($bffRef -ne 'bksbwnxdurmuolygiofh' -or $taskToken -notmatch '^[A-Za-z0-9._-]{20,4096}$') {
+    throw 'BFF management scope or credential format is invalid.'
+  }
+  $taskRequestDir = Join-Path (Get-Location) '.artifacts/database'
+  New-Item -ItemType Directory -Path $taskRequestDir -Force | Out-Null
+  $taskRequestPath = Join-Path $taskRequestDir ('query-' + [guid]::NewGuid().ToString('N') + '.json')
+  # The request file contains reviewed SQL only. The management token goes to curl on stdin,
+  # never a command argument or a file. A lost response is never retried automatically.
+  [IO.File]::WriteAllText($taskRequestPath, (@{query=$Query} | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+  try {
+    $taskRaw = ('header = "Authorization: Bearer ' + $taskToken + '"') |
+      & curl.exe --config - --request POST --header 'Content-Type: application/json; charset=utf-8' --data-binary "@$taskRequestPath" --silent --show-error --fail-with-body --connect-timeout 20 --max-time 360 "https://api.supabase.com/v1/projects/$bffRef/database/query"
+    if ($LASTEXITCODE -ne 0) { throw "BFF management query transport failed (curl exit $LASTEXITCODE); inspect live state before retrying a mutation." }
+    return (ConvertFrom-Json -InputObject ($taskRaw -join "`n"))
+  } finally {
+    [IO.File]::Delete($taskRequestPath)
+  }
 }
 if ($Action -eq 'InspectBffActivity') {
   $taskMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
@@ -404,6 +418,11 @@ if ($Action -eq 'CleanupUpstreamFixtures') {
   }
   $taskTenantSql = 'array[' + (($taskTenantIds | ForEach-Object { "'$([guid]$_)'::uuid" }) -join ',') + ']'
   $taskMemberSql = 'array[' + (($taskMemberIds | ForEach-Object { "'$([guid]$_)'::uuid" }) -join ',') + ']'
+  $taskNonceInstalled = @(Invoke-BffQuery "select to_regclass('public.bff_pro_bridge_nonces') is not null as present")
+  if ($taskNonceInstalled.Count -ne 1) { throw 'Cannot verify bridge nonce table before fixture cleanup.' }
+  $taskBridgeNonceCleanup = if ($taskNonceInstalled[0].present) {
+    "delete from public.bff_pro_bridge_nonces where tenant_id=any($taskTenantSql);"
+  } else { '' }
   $taskCleanupSql = @"
 begin;
 set constraints all deferred;
@@ -414,7 +433,11 @@ begin
     perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||tenant::text,0));
   end loop;
   if exists(select 1 from public.bff_members m where m.tenant_id=any(tenants) and
-    (not(m.id=any(members)) or m.subject<>'bff-upstream-fixture:'||m.id::text or m.email not like '%@example.test')) or
+    (not(m.id=any(members)) or
+      not(m.subject='bff-upstream-fixture:'||m.id::text or
+        (m.issuer='https://ckbftoopuyophiebamwy.supabase.co/auth/v1' and
+         m.subject=m.id::text and m.display_name like 'bff-pro-bridge-fixture:%')) or
+      m.email not like '%@example.test')) or
     exists(select 1 from public.bff_members m where m.id=any(members) and not(m.tenant_id=any(tenants))) or
     exists(select 1 from public.bff_applications a where a.tenant_id=any(tenants) and not(a.created_by=any(members)))
   then raise exception 'Refusing cleanup: namespace contains non-fixture records'; end if;
@@ -427,6 +450,7 @@ lock table public.bff_interface_versions,public.bff_interface_version_upstreams,
 alter table public.bff_interface_versions disable trigger bff_interface_versions_immutable;
 alter table public.bff_interface_version_upstreams disable trigger bff_interface_version_upstreams_immutable;
 alter table public.bff_interface_release_events disable trigger bff_interface_release_events_immutable;
+$taskBridgeNonceCleanup
 delete from public.bff_sessions where member_id=any($taskMemberSql);
 delete from public.bff_platform_settings where tenant_id=any($taskTenantSql);
 delete from public.bff_audit_events where tenant_id=any($taskTenantSql);
@@ -536,7 +560,7 @@ select jsonb_build_object(
     if (@($taskBackup.tables.$taskName).Count -ne [int]$taskDatabaseSnapshot.rowCounts.$taskName) { throw 'BFF recovery row counts do not match.' }
   }
   $taskVerification = ''
-  foreach ($taskVerificationPath in @('tests/integration/business-dictionaries.sql','tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql','tests/integration/release-schema.sql','tests/integration/branding-schema.sql','tests/integration/calls-alerts-schema.sql','tests/integration/resources-schema.sql','tests/integration/member-provision.sql')) {
+  foreach ($taskVerificationPath in @('tests/integration/business-dictionaries.sql','tests/integration/control-plane-schema.sql','tests/integration/role-access.sql','tests/integration/application-authorization.sql','tests/integration/upstream-schema.sql','tests/integration/interface-schema.sql','tests/integration/release-schema.sql','tests/integration/branding-schema.sql','tests/integration/calls-alerts-schema.sql','tests/integration/resources-schema.sql','tests/integration/member-provision.sql','tests/integration/pro-bridge-schema.sql')) {
     if (Test-Path -LiteralPath $taskVerificationPath) {
       $taskVerificationPart = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskVerificationPath
       if ($taskVerificationPart -match '(?im)^\s*(begin|commit|rollback)\s*;') { throw 'Schema verification cannot control the outer transaction.' }

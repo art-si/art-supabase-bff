@@ -344,28 +344,59 @@ async function mockApi(page: Page, optionsDelayMs = 0): Promise<MockState> {
       await reply(updated)
       return
     }
-    if (url.pathname === `/api/interfaces/${createdId}/validate` && method === 'POST') {
+    const validating = state.rows.find(
+      (row) => url.pathname === `/api/interfaces/${row.id}/validate`
+    )
+    if (validating && method === 'POST') {
       const input = body()
       state.writes.push({ method, path: url.pathname, body: input })
-      const current = state.rows.find((row) => row.id === createdId)
-      if (!current) throw new Error('Synthetic created interface missing')
       const validated: InterfaceRecord = {
-        ...current,
+        ...validating,
         validationStatus: 'valid',
-        validatedVersion: current.version,
+        validatedVersion: validating.version,
         validationIssues: [],
         lastValidatedAt: timestamp
       }
-      state.rows = state.rows.map((row) => (row.id === createdId ? validated : row))
+      state.rows = state.rows.map((row) => (row.id === validating.id ? validated : row))
       await reply(validated)
       return
     }
-    if (url.pathname === `/api/interfaces/${createdId}/tests` && method === 'POST') {
+    const testing = state.rows.find((row) => url.pathname === `/api/interfaces/${row.id}/tests`)
+    if (testing && method === 'POST') {
       const input = body()
       state.writes.push({ method, path: url.pathname, body: input })
       state.testRuns += 1
-      const current = state.rows.find((row) => row.id === createdId)
-      if (!current) throw new Error('Synthetic created interface missing')
+      const current = testing
+      if (current.id === firstId) {
+        await reply({
+          interfaceId: firstId,
+          version: current.version,
+          passed: true,
+          stale: false,
+          output: {
+            records: [
+              { orderId: 'ORD-001', amount: 12, privateToken: 'DO_NOT_DISPLAY' },
+              { orderId: 'ORD-002', amount: 18, privateToken: 'DO_NOT_DISPLAY' }
+            ],
+            total: 2,
+            current: 1,
+            size: 20
+          },
+          steps: [
+            {
+              key: 'fetchOrder',
+              name: '查询订单',
+              status: 'passed',
+              statusCode: 200,
+              durationMs: 26,
+              message: '已解析统一响应'
+            }
+          ],
+          durationMs: 26,
+          message: '分页输出已按白名单生成'
+        })
+        return
+      }
       if (state.testRuns === 1) {
         await reply({
           interfaceId: createdId,
@@ -580,6 +611,98 @@ test('create, edit two steps, validate and test with invalid input and stale res
   mkdirSync(path.dirname(screenshotPath), { recursive: true })
   await page.screenshot({ path: screenshotPath })
   expect(state.testRuns).toBe(2)
+  expect(state.unexpected).toEqual([])
+  expect(state.errors).toEqual([])
+})
+
+test('business response and GET page contract save a whitelist and show paged test records', async ({
+  page
+}) => {
+  const state = await mockApi(page)
+  state.rows[0]!.definition.inputs.push(
+    { key: 'current', label: '当前页', location: 'query', type: 'number', required: true },
+    { key: 'size', label: '每页条数', location: 'query', type: 'number', required: true }
+  )
+  await page.goto('/interfaces')
+  const row = page.getByRole('row').filter({ hasText: '验收示例：订单查询接口' })
+  await row.getByRole('button', { name: '编辑接口草稿' }).click()
+  const editor = page.getByRole('dialog', { name: '编辑接口草稿' })
+  await editor.getByRole('tab', { name: /编排步骤/ }).click()
+  const step = editor.getByTestId('interface-step-1')
+  await step.locator('.el-switch:has(input[aria-label="步骤 1 解析统一响应"])').click()
+  await step.getByLabel('步骤 1 成功判定').click()
+  await page.getByRole('option', { name: '业务码判定' }).click()
+  await step.getByLabel('步骤 1 成功业务码').fill('["0", 200]')
+  await step.locator('.el-switch:has(input[aria-label="步骤 1 启用受控分页"])').click()
+  await step.getByLabel('步骤 1 页码输入').click()
+  await page
+    .getByRole('listbox', { name: '步骤 1 页码输入' })
+    .getByRole('option', { name: /当前页（current）/ })
+    .click()
+  await step.getByLabel('步骤 1 条数输入').click()
+  await page
+    .getByRole('listbox', { name: '步骤 1 条数输入' })
+    .getByRole('option', { name: /每页条数（size）/ })
+    .click()
+  await editor.getByRole('tab', { name: /输出映射/ }).click()
+  await editor.getByText('分页记录', { exact: true }).click()
+  await editor.getByLabel('记录来源步骤').click()
+  await page.getByRole('option', { name: '查询订单' }).click()
+  await editor.getByLabel('记录数组 JSON Pointer').fill('/records')
+  await editor.getByLabel('总数 JSON Pointer').fill('/total')
+  await editor.getByLabel('当前页输入').click()
+  await page
+    .getByRole('option', { name: /当前页（current）/ })
+    .last()
+    .click()
+  await editor.getByLabel('每页条数输入').click()
+  await page
+    .getByRole('option', { name: /每页条数（size）/ })
+    .last()
+    .click()
+  await editor.getByRole('button', { name: '新增字段' }).click()
+  await editor.getByRole('button', { name: '新增字段' }).click()
+  await editor.getByLabel('记录字段 1 输出键').fill('orderId')
+  await editor.getByLabel('记录字段 1 显示名称').fill('订单编号')
+  await editor.getByLabel('记录字段 1 指针').fill('/id')
+  await editor.getByLabel('记录字段 2 输出键').fill('amount')
+  await editor.getByLabel('记录字段 2 显示名称').fill('金额')
+  await editor.getByLabel('记录字段 2 指针').fill('/amount')
+  await editor.getByLabel('记录字段 2 类型').click()
+  await page.getByRole('option', { name: '数字' }).click()
+  await editor.getByRole('button', { name: '保存草稿' }).click()
+  await expect(editor).toHaveCount(0)
+  const written = state.writes.at(-1)?.body.definition as InterfaceDefinition
+  expect(written.outputs).toEqual([])
+  expect(written.steps[0]?.responseContract).toEqual({
+    mode: 'business',
+    codePointer: '/code',
+    dataPointer: '/data',
+    successCodes: ['0', 200]
+  })
+  expect(written.steps[0]?.pagination).toMatchObject({
+    mode: 'page',
+    currentInputKey: 'current',
+    sizeInputKey: 'size',
+    pageParameter: 'page',
+    sizeParameter: 'size'
+  })
+  expect(written.page?.fields.map((field) => field.target)).toEqual(['orderId', 'amount'])
+
+  await row.getByRole('button', { name: '更多操作' }).hover()
+  await page.getByRole('menuitem', { name: '验证定义' }).click()
+  await expect(row.getByText('已通过')).toBeVisible()
+  await row.getByRole('button', { name: '更多操作' }).hover()
+  await page.getByRole('menuitem', { name: '运行测试' }).click()
+  const testDialog = page.getByRole('dialog', { name: '接口测试' })
+  await testDialog.getByPlaceholder('输入订单编号').fill('ORD-001')
+  await testDialog.getByRole('spinbutton', { name: /当前页/ }).fill('1')
+  await testDialog.getByRole('spinbutton', { name: /每页条数/ }).fill('20')
+  await testDialog.getByRole('button', { name: '运行测试' }).click()
+  await expect(testDialog.getByText('ORD-001')).toBeVisible()
+  await expect(testDialog.getByText('ORD-002')).toBeVisible()
+  await expect(testDialog.getByText('第 1 页 · 每页 20 条 · 共 2 条')).toBeVisible()
+  await expect(testDialog.getByText('DO_NOT_DISPLAY')).toHaveCount(0)
   expect(state.unexpected).toEqual([])
   expect(state.errors).toEqual([])
 })

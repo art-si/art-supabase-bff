@@ -1,6 +1,7 @@
 import type {
   InterfaceDefinition,
   InterfaceMethod,
+  InterfacePageResult,
   InterfaceScalar,
   InterfaceWriteInput
 } from './interface'
@@ -118,5 +119,7 @@ export interface PublishedExecution {
 export interface GatewayResponse {
   requestId: string
   version: number
-  data: Record<string, InterfaceScalar>
+  code?: 200
+  msg?: string
+  data: Record<string, InterfaceScalar> | InterfacePageResult
 }

@@ -370,6 +370,53 @@ test('orchestration request keeps the base path, encodes query and sends only co
   )
 })
 
+test('exact count exposes only validated Content-Range and a fixed Prefer header', async () => {
+  await withLocalServer(
+    (request, response) => {
+      assert.equal(request.headers.prefer, 'count=exact')
+      response
+        .writeHead(200, {
+          'Content-Type': 'application/json',
+          'Content-Range': '0-1/2',
+          'X-Private-Header': 'never-return'
+        })
+        .end('[{"id":"A"},{"id":"B"}]')
+    },
+    async (origin) => {
+      const result = await executeUpstreamRequest(
+        origin,
+        {
+          method: 'GET',
+          path: '/items',
+          query: { limit: '2' },
+          exactCount: true
+        },
+        1000,
+        localPolicy(origin)
+      )
+      assert.equal(result.contentRange, '0-1/2')
+      assert.ok(!JSON.stringify(result).includes('never-return'))
+      assert.deepEqual(result.body, [{ id: 'A' }, { id: 'B' }])
+      assert.equal(
+        (
+          await executeUpstreamRequest(
+            origin,
+            {
+              method: 'POST',
+              path: '/items',
+              query: {},
+              exactCount: true
+            },
+            1000,
+            localPolicy(origin)
+          )
+        ).code,
+        'invalid_policy'
+      )
+    }
+  )
+})
+
 test('orchestration refuses path escapes, unsafe credential headers and oversized requests before network', async () => {
   let requests = 0
   await withLocalServer(

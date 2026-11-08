@@ -221,6 +221,30 @@ const dictionaries = [
         label: '固定值'
       }
     ]
+  },
+  {
+    code: 'bffResponseContractMode',
+    name: '响应解析方式',
+    options: [
+      { value: 'http', label: '传输成功提取' },
+      { value: 'business', label: '业务码判定' }
+    ]
+  },
+  {
+    code: 'bffPaginationMode',
+    name: '上游分页方式',
+    options: [
+      { value: 'page', label: '页码 + 页长' },
+      { value: 'offset', label: '偏移 + 页长' }
+    ]
+  },
+  {
+    code: 'bffPageTotalSource',
+    name: '分页总数来源',
+    options: [
+      { value: 'body', label: '响应数据' },
+      { value: 'content-range', label: 'Content-Range' }
+    ]
   }
 ]
 

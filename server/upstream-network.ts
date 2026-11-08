@@ -39,6 +39,7 @@ export interface UpstreamExecutionRequest {
   query: Record<string, string>
   body?: Record<string, unknown>
   credential?: { headerName: string; value: string }
+  exactCount?: boolean
 }
 export interface UpstreamExecutionResult {
   ok: boolean
@@ -46,6 +47,7 @@ export interface UpstreamExecutionResult {
   statusCode: number | null
   durationMs: number
   body: unknown | null
+  contentRange?: string
 }
 
 interface ResolvedAddress {
@@ -327,6 +329,7 @@ function executionTarget(
 
   if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) reject('invalid_policy')
   if (request.method === 'GET' && request.body !== undefined) reject('invalid_policy')
+  if (request.exactCount && request.method !== 'GET') reject('invalid_policy')
   let body: Buffer | null = null
   if (request.body !== undefined) {
     if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body))
@@ -342,6 +345,7 @@ function executionTarget(
     Accept: 'application/json',
     'Accept-Encoding': 'identity'
   }
+  if (request.exactCount) headers.Prefer = 'count=exact'
   if (body) {
     headers['Content-Type'] = 'application/json; charset=utf-8'
     headers['Content-Length'] = String(body.length)
@@ -382,18 +386,21 @@ interface TransportOutcome {
   statusCode: number | null
   durationMs: number
   body: unknown | null
+  contentRange?: string
 }
 
 function outcome(
   code: UpstreamExecutionCode,
   started: number,
   statusCode: number | null = null,
-  body: unknown | null = null
+  body: unknown | null = null,
+  contentRange?: string
 ): TransportOutcome {
   return {
     code,
     statusCode,
     body,
+    ...(contentRange ? { contentRange } : {}),
     durationMs: Math.max(0, Math.round(performance.now() - started))
   }
 }
@@ -442,11 +449,12 @@ function networkRequest(
     const finish = (
       code: UpstreamExecutionCode,
       statusCode: number | null = null,
-      responseBody: unknown | null = null
+      responseBody: unknown | null = null,
+      contentRange?: string
     ) => {
       if (settled) return
       settled = true
-      resolve(outcome(code, started, statusCode, responseBody))
+      resolve(outcome(code, started, statusCode, responseBody, contentRange))
     }
     const request = (secure ? httpsRequest : httpRequest)(
       {
@@ -513,9 +521,14 @@ function networkRequest(
             finish('reachable', statusCode, {})
             return
           }
+          const rawRange = response.headers['content-range']
+          const contentRange =
+            typeof rawRange === 'string' && /^(?:[0-9]+-[0-9]+|\*)\/(?:[0-9]+|\*)$/.test(rawRange)
+              ? rawRange
+              : undefined
           const parsed = jsonResponse(response.headers['content-type'], chunks)
           if (parsed === null) finish('invalid_response', statusCode)
-          else finish('reachable', statusCode, parsed)
+          else finish('reachable', statusCode, parsed, contentRange)
         })
       }
     )
@@ -623,7 +636,7 @@ export async function executeUpstreamRequest(
   policy: UpstreamNetworkPolicy,
   resolver: UpstreamResolver = (hostname) => dnsLookup(hostname, { all: true, order: 'verbatim' })
 ): Promise<UpstreamExecutionResult> {
-  const { code, statusCode, durationMs, body } = await throughPolicy(
+  const { code, statusCode, durationMs, body, contentRange } = await throughPolicy(
     baseUrl,
     timeoutMs,
     policy,
@@ -634,5 +647,12 @@ export async function executeUpstreamRequest(
       mode: 'execute'
     })
   )
-  return { ok: code === 'reachable', code, statusCode, durationMs, body }
+  return {
+    ok: code === 'reachable',
+    code,
+    statusCode,
+    durationMs,
+    body,
+    ...(contentRange ? { contentRange } : {})
+  }
 }

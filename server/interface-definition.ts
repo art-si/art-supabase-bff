@@ -5,6 +5,8 @@ import type {
   InterfaceDefinition,
   InterfaceInputField,
   InterfaceMethod,
+  InterfacePageDefinition,
+  InterfacePageField,
   InterfaceScalar,
   InterfaceScalarType,
   InterfaceStep,
@@ -112,7 +114,7 @@ function step(value: unknown): InterfaceStep {
   const item = record(value, '调用步骤')
   if (!Number.isSafeInteger(item.configVersion) || Number(item.configVersion) < 1)
     invalid('请选择上游服务的有效配置版本')
-  return {
+  const result: InterfaceStep = {
     key: key(item.key, '步骤标识'),
     name: text(item.name, '步骤名称', 80, true),
     upstreamId: uuid(String(item.upstreamId)),
@@ -123,14 +125,98 @@ function step(value: unknown): InterfaceStep {
     query: bindings(item.query, '查询参数映射'),
     body: bindings(item.body, '请求体映射')
   }
+  if (item.responseContract !== undefined) {
+    const contract = record(item.responseContract, '响应合同')
+    if (contract.mode !== 'http' && contract.mode !== 'business') invalid('响应判定方式无效')
+    const codePointer = text(contract.codePointer, '业务状态路径', 256)
+    const dataPointer = text(contract.dataPointer, '业务数据路径', 256)
+    pointerSegments(codePointer)
+    pointerSegments(dataPointer)
+    const successCodes = list(
+      contract.successCodes,
+      '成功状态码',
+      contract.mode === 'business' ? 1 : 0,
+      16
+    )
+    if (contract.mode === 'business' && !codePointer) invalid('业务响应须声明状态码路径')
+    if (contract.mode === 'http' && successCodes.length) invalid('HTTP 响应不能设置业务状态码')
+    if (
+      successCodes.some((code) =>
+        typeof code === 'string'
+          ? !code || code.length > 80
+          : typeof code !== 'number' || !Number.isSafeInteger(code) || Math.abs(code) > 1e12
+      )
+    )
+      invalid('成功状态码格式无效')
+    result.responseContract = {
+      mode: contract.mode,
+      codePointer,
+      dataPointer,
+      successCodes: successCodes as Array<string | number>
+    }
+  }
+  if (item.pagination !== undefined) {
+    const pagination = record(item.pagination, '分页设置')
+    if (pagination.mode !== 'page' && pagination.mode !== 'offset') invalid('分页模式无效')
+    if (typeof pagination.exactCount !== 'boolean') invalid('精确计数设置无效')
+    result.pagination = {
+      mode: pagination.mode,
+      currentInputKey: key(pagination.currentInputKey, '当前页输入'),
+      sizeInputKey: key(pagination.sizeInputKey, '每页数量输入'),
+      pageParameter: key(pagination.pageParameter, '页码参数'),
+      sizeParameter: key(pagination.sizeParameter, '页长参数'),
+      exactCount: pagination.exactCount
+    }
+  }
+  return result
+}
+
+function pageField(value: unknown): InterfacePageField {
+  const item = record(value, '分页结果字段')
+  if (typeof item.required !== 'boolean') invalid('分页字段必填状态无效')
+  const pointer = text(item.pointer, '分页字段路径', 256)
+  pointerSegments(pointer)
+  if (!pointer) invalid('分页字段须指向记录中的明确字段')
+  return {
+    target: key(item.target, '分页字段名'),
+    label: text(item.label, '分页字段说明', 50, true),
+    pointer,
+    type: scalarType(item.type),
+    required: item.required
+  }
+}
+
+function pageDefinition(value: unknown): InterfacePageDefinition {
+  const item = record(value, '分页输出')
+  if (item.totalSource !== 'body' && item.totalSource !== 'content-range')
+    invalid('分页总数来源无效')
+  const recordsPointer = text(item.recordsPointer, '记录数组路径', 256)
+  const totalPointer = text(item.totalPointer, '总数路径', 256)
+  pointerSegments(recordsPointer)
+  pointerSegments(totalPointer)
+  if (item.totalSource === 'body' && !totalPointer) invalid('请配置响应总数路径')
+  if (item.totalSource === 'content-range' && totalPointer)
+    invalid('Content-Range 总数无需响应路径')
+  return {
+    stepKey: key(item.stepKey, '分页来源步骤'),
+    recordsPointer,
+    totalSource: item.totalSource,
+    totalPointer,
+    currentInputKey: key(item.currentInputKey, '当前页输入'),
+    sizeInputKey: key(item.sizeInputKey, '每页数量输入'),
+    fields: list(item.fields, '分页字段', 1, 32).map(pageField)
+  }
 }
 export function normalizeInterfaceDefinition(value: unknown): InterfaceDefinition {
   const item = record(value, '接口定义')
-  const result = {
+  const page = item.page === undefined ? undefined : pageDefinition(item.page)
+  const result: InterfaceDefinition = {
     inputs: list(item.inputs, '输入参数', 0, 32).map(inputField),
     steps: list(item.steps, '调用步骤', 1, 8).map(step),
-    outputs: bindings(item.outputs, '输出字段', 1)
+    outputs: bindings(item.outputs, '输出字段', page ? 0 : 1),
+    ...(page ? { page } : {})
   }
+  if (page && result.outputs.length) invalid('分页模式不能同时配置标量输出')
   if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 49152)
     invalid('接口定义过长，请减少步骤或固定值内容')
   return result
@@ -239,9 +325,50 @@ export function validateInterfaceDefinition(input: InterfaceWriteInput): string[
       issues.push(`步骤「${item.name}」的路径占位符与映射不一致`)
     if (item.method === 'GET' && item.body.length)
       issues.push(`步骤「${item.name}」的 GET 请求不能携带请求体`)
+    if (item.pagination) {
+      const pagination = item.pagination
+      const current = inputs.find((field) => field.key === pagination.currentInputKey)
+      const size = inputs.find((field) => field.key === pagination.sizeInputKey)
+      if (
+        item.method !== 'GET' ||
+        !current ||
+        !size ||
+        current.type !== 'number' ||
+        size.type !== 'number' ||
+        current.location !== 'query' ||
+        size.location !== 'query' ||
+        !current.required ||
+        !size.required ||
+        current.key === size.key
+      )
+        issues.push(`步骤「${item.name}」的分页输入须为两个必填查询数字，且仅支持 GET`)
+      if (
+        pagination.pageParameter === pagination.sizeParameter ||
+        item.query.some(
+          (binding) =>
+            binding.target === pagination.pageParameter ||
+            binding.target === pagination.sizeParameter
+        )
+      )
+        issues.push(`步骤「${item.name}」的分页参数与查询映射冲突`)
+    }
     previousSteps.push(item.key)
   }
-  checkMappings(outputs, '响应映射')
+  if (input.definition.page) {
+    const page = input.definition.page
+    const selected = steps.find((step) => step.key === page.stepKey)
+    if (
+      !selected?.pagination ||
+      selected.pagination.currentInputKey !== page.currentInputKey ||
+      selected.pagination.sizeInputKey !== page.sizeInputKey
+    )
+      issues.push('分页输出须绑定已配置分页的步骤和同一组输入')
+    uniqueNames(
+      page.fields.map((field) => field.target),
+      '分页字段',
+      issues
+    )
+  } else checkMappings(outputs, '响应映射')
   return uniq(issues).slice(0, 40)
 }
 export function parseInterfaceSample(

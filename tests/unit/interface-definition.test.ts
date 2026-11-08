@@ -111,3 +111,46 @@ test('interface public projection drops unexpected credentials and server-only a
   assert.ok(!JSON.stringify(projected).includes('never-return'))
   assert.equal(projected.definition.steps.length, 2)
 })
+
+test('optional response and page contracts validate declared pagination without changing old definitions', () => {
+  const old = interfaceFixture()
+  assert.equal('page' in normalizeInterfaceDefinition(old.definition), false)
+  assert.equal('responseContract' in normalizeInterfaceDefinition(old.definition).steps[0], false)
+  const sample = interfaceFixture()
+  sample.definition.inputs.push(
+    { key: 'current', label: '页码', location: 'query', type: 'number', required: true },
+    { key: 'size', label: '页长', location: 'query', type: 'number', required: true }
+  )
+  sample.definition.steps[0].pagination = {
+    mode: 'offset',
+    currentInputKey: 'current',
+    sizeInputKey: 'size',
+    pageParameter: 'offset',
+    sizeParameter: 'limit',
+    exactCount: true
+  }
+  sample.definition.steps[0].responseContract = {
+    mode: 'business',
+    codePointer: '/code',
+    dataPointer: '/data',
+    successCodes: [0, 'OK']
+  }
+  sample.definition.outputs = []
+  sample.definition.page = {
+    stepKey: sample.definition.steps[0].key,
+    recordsPointer: '/records',
+    totalSource: 'body',
+    totalPointer: '/total',
+    currentInputKey: 'current',
+    sizeInputKey: 'size',
+    fields: [{ target: 'name', label: '名称', pointer: '/name', type: 'string', required: true }]
+  }
+  const normalized = normalizeInterfaceDefinition(sample.definition)
+  assert.equal(normalized.page?.fields[0].target, 'name')
+  assert.deepEqual(validateInterfaceDefinition({ ...sample, definition: normalized }), [])
+  sample.definition.steps[0].query.push(inputBinding('offset', 'current'))
+  assert.ok(validateInterfaceDefinition(sample).some((issue) => issue.includes('分页参数')))
+  sample.definition.steps[0].query = []
+  sample.definition.page.fields[0].target = 'access_token'
+  assert.throws(() => normalizeInterfaceDefinition(sample.definition))
+})

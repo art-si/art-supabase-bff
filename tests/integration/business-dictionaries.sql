@@ -16,7 +16,9 @@ begin
       ('bffUpstreamStatus','BffUpstreamManagement',3),('bffUpstreamAuthType','BffUpstreamManagement',3),
       ('bffCredentialAction','BffUpstreamManagement',2),('bffInterfaceMethod','BffInterfaceManagement',5),
       ('bffInterfaceValidationStatus','BffInterfaceManagement',3),('bffInterfaceInputLocation','BffInterfaceManagement',3),
-      ('bffInterfaceValueType','BffInterfaceManagement',3),('bffInterfaceBindingSource','BffInterfaceManagement',3)
+      ('bffInterfaceValueType','BffInterfaceManagement',3),('bffInterfaceBindingSource','BffInterfaceManagement',3),
+      ('bffResponseContractMode','BffInterfaceManagement',2),('bffPaginationMode','BffInterfaceManagement',2),
+      ('bffPageTotalSource','BffInterfaceManagement',2)
     ) as expected(code,directory,item_count) loop
       if not exists(select 1 from public.bff_dictionary_types t join public.bff_dictionary_types p on p.id=t.parent_id
         where t.tenant_id=actor.tenant_id and p.tenant_id=actor.tenant_id and t.node_type='dictionary'

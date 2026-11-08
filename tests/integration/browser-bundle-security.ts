@@ -7,6 +7,7 @@ import { credentialKeyring } from '../../server/upstream-credentials'
 const root = path.resolve(config.browserOutputDir)
 const credentials = [config.clientSecret, config.sessionKey, config.databaseKey]
 if (config.identityDirectoryKey) credentials.push(config.identityDirectoryKey)
+if (config.proBridgeSecret) credentials.push(config.proBridgeSecret)
 credentials.push(...credentialKeyring(config.credentialKeys, config.credentialKeyId).keys.values())
 assert.ok(
   credentials.every((value) => value.length >= 16),
