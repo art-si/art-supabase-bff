@@ -1,5 +1,6 @@
 param(
-  [ValidateSet('ValidateSessionRefresh','SyncSessionRefresh','SyncWordmarkPermission','PrepareMemberDirectory','InspectBusinessDictionaries','SyncBusinessDictionaries','Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','InspectResources','InspectBffActivity','AuditBffSecurity','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation','EnableObservabilityNavigation','DisableObservabilityNavigation')][string]$Action = 'Inspect',
+  [ValidateSet('ValidateSessionRefresh','SyncProTransportPilot','SyncSessionRefresh','SyncWordmarkPermission','PrepareMemberDirectory','InspectBusinessDictionaries','SyncBusinessDictionaries','Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','InspectResources','InspectBffActivity','AuditBffSecurity','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation','EnableObservabilityNavigation','DisableObservabilityNavigation')][string]$Action = 'Inspect',
+
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -242,6 +243,66 @@ select jsonb_build_object(
   $null = Invoke-BffQuery ("begin;`n"+$taskSeed+"`ncommit;")
   $null = Invoke-BffQuery ("begin;`n"+$taskAssertions+"`nrollback;")
   Write-Output 'Session refresh coordination applied to the scoped BFF project; lifecycle and RPC privileges verified.'
+}
+if ($Action -eq 'SyncProTransportPilot') {
+  $taskProMcpPath = Join-Path (Split-Path (Get-Location)) 'art-supabase-pro/.mcp.json'
+  $taskProMcp = Get-Content -Raw -LiteralPath $taskProMcpPath | ConvertFrom-Json
+  $taskBffMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
+  if ($proRef -ne 'ckbftoopuyophiebamwy' -or $bffRef -ne 'bksbwnxdurmuolygiofh' -or
+    $taskProMcp.mcpServers.supabase.url -notmatch 'project_ref=ckbftoopuyophiebamwy(?:&|$)' -or
+    $taskBffMcp.mcpServers.supabase.url -notmatch 'project_ref=bksbwnxdurmuolygiofh(?:&|$)') { throw 'Transport pilot project scope mismatch.' }
+  function Invoke-ProPilotQuery([string]$Query) {
+    $taskResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "https://api.supabase.com/v1/projects/$proRef/database/query" -Headers $taskHeaders -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes((@{query=$Query}|ConvertTo-Json -Compress)))
+    return (Read-Utf8JsonResponse $taskResponse)
+  }
+  $taskSource = Get-Content -Raw -Encoding UTF8 -LiteralPath 'server/database/schema.sql'
+  $taskBlock = [regex]::Match($taskSource,'(?s)-- BEGIN BFF PRO TRANSPORT PILOT\r?\n(.*?)-- END BFF PRO TRANSPORT PILOT')
+  if (!$taskBlock.Success) { throw 'Canonical pilot block is missing.' }
+  $taskBeforeBff = @(Invoke-BffQuery @'
+select jsonb_build_object('applications',(select jsonb_agg(to_jsonb(a)) from public.bff_applications a),
+  'menus',(select jsonb_agg(to_jsonb(m)) from public.bff_menus m),
+  'revisions',(select jsonb_agg(to_jsonb(r)) from public.bff_resource_revisions r),
+  'function',(select pg_get_functiondef(p.oid) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='bff_pro_transport_context')) as snapshot
+'@)
+  $taskBeforePro = @(Invoke-ProPilotQuery "select to_jsonb(m) as menu from public.sys_menu m where name in ('TmsPendingWaybillList','TmsPendingWaybillList:ResourcePreflight')")
+  if ($taskBeforeBff.Count -ne 1 -or !@($taskBeforePro | Where-Object {$_.menu.name -eq 'TmsPendingWaybillList'}).Count) { throw 'Pilot recovery source is incomplete.' }
+  New-Item -ItemType Directory -Path '.artifacts/database' -Force | Out-Null
+  $taskBackupPath = Join-Path (Get-Location) ('.artifacts/database/pro-transport-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '.json')
+  [IO.File]::WriteAllText($taskBackupPath,(@{ bffProject=$bffRef; proProject=$proRef; bff=$taskBeforeBff[0].snapshot; pro=$taskBeforePro }|ConvertTo-Json -Depth 50),[Text.Encoding]::UTF8)
+  $taskRecovery = Get-Content -Raw -LiteralPath $taskBackupPath | ConvertFrom-Json
+  if ($taskRecovery.bffProject -ne $bffRef -or $taskRecovery.proProject -ne $proRef) { throw 'Pilot recovery verification failed.' }
+  $taskProSeed = @'
+insert into public.sys_menu(parent_id,name,type,app_code,sort,meta,create_by,update_by)
+select p.id,'TmsPendingWaybillList:ResourcePreflight','button',p.app_code,90,
+  jsonb_build_object('title','调度资源综合核验','icon','ri:shield-check-line','is_enable',true,'is_auth_button',true),
+  '624944977@qq.com','624944977@qq.com'
+from public.sys_menu p where p.name='TmsPendingWaybillList' and not exists(
+  select 1 from public.sys_menu b where b.name='TmsPendingWaybillList:ResourcePreflight');
+do $$ begin
+  if not exists(select 1 from public.sys_menu b join public.sys_menu p on p.id=b.parent_id
+    where b.name='TmsPendingWaybillList:ResourcePreflight' and p.name='TmsPendingWaybillList' and b.app_code=p.app_code) then
+    raise exception 'Pro resource preflight button ownership is invalid'; end if;
+end $$;
+'@
+  $taskAssertions = Get-Content -Raw -Encoding UTF8 -LiteralPath 'tests/integration/pro-transport-pilot.sql'
+  $taskSeed = $taskBlock.Groups[1].Value
+  $null = Invoke-BffQuery ("begin;`n"+$taskSeed+"`n"+$taskSeed+"`n"+$taskAssertions+"`nrollback;")
+  $null = Invoke-ProPilotQuery ("begin;`n"+$taskProSeed+"`nrollback;")
+  $null = Invoke-BffQuery ("begin;`n"+$taskSeed+"`ncommit;")
+  $null = Invoke-ProPilotQuery ("begin;`n"+$taskProSeed+"`ncommit;")
+  Invoke-BffQuery ("begin;`n"+$taskAssertions+"`nrollback;") | ConvertTo-Json -Depth 5
+  $taskKeys = Invoke-RestMethod -Uri "https://api.supabase.com/v1/projects/$proRef/api-keys" -Headers $taskHeaders
+  $taskPublicKey = ($taskKeys | Where-Object name -eq 'anon').api_key
+  if (!$taskPublicKey) { throw 'Pro public project key is unavailable.' }
+  $taskEnvPath = Join-Path (Get-Location) '.env.local'
+  $taskEnvLines = @([IO.File]::ReadAllLines($taskEnvPath))
+  foreach ($taskSetting in @("BFF_PRO_PUBLIC_KEY=$taskPublicKey",'BFF_PRO_INTEGRATION_ORIGINS=http://localhost:3006,http://127.0.0.1:3006')) {
+    $taskSettingName = $taskSetting.Split('=')[0]
+    $taskEnvLines = @($taskEnvLines | Where-Object { !$_.StartsWith("$taskSettingName=") }) + $taskSetting
+  }
+  [IO.File]::WriteAllLines($taskEnvPath,$taskEnvLines)
+  Write-Output 'Scoped BFF pilot application and pro button registered. Pro public key and local origin allowlist saved server-side; no business records changed.'
+
   exit
 }
 if ($Action -eq 'SyncWordmarkPermission') {

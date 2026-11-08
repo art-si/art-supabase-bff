@@ -49,6 +49,7 @@ import {
 } from './releases'
 import { handleBridgeGateway, handleGateway } from './gateway'
 import { authenticateProBridge } from './pro-bridge'
+import { authorizeProIntegrationOrigin, readProDispatchPreflight } from './pro-transport'
 import { brandingDto, readBranding, writeBranding } from './branding'
 import { generateBrandWordmark } from './wordmark'
 import {
@@ -127,7 +128,24 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       await handleBridgeGateway(req, res, bridge.member, bridge.invocation, randomUUID())
       return
     }
+    const isProPreflight = url.pathname === '/api/integrations/pro/dispatch-preflight'
+    if (isProPreflight) {
+      authorizeProIntegrationOrigin(req, res)
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Methods': 'GET',
+          'Access-Control-Max-Age': '300'
+        })
+        res.end()
+        return
+      }
+      if (req.method !== 'GET') throw new HttpError(405, '综合核验仅提供只读查询')
+    }
     const session = await authenticate(req)
+    if (isProPreflight) {
+      json(res, await readProDispatchPreflight(session, url))
+      return
+    }
     if (requestId) {
       await handleGateway(req, res, session, url, requestId)
       return

@@ -4591,4 +4591,45 @@ begin
   end loop;
 end $bff_wordmark_permission$;
 -- END BFF WORDMARK PERMISSION
+-- BEGIN BFF PRO TRANSPORT PILOT
+create or replace function public.bff_pro_transport_context(p_actor uuid)
+returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare actor public.bff_members; application public.bff_applications;
+begin
+  select * into actor from public.bff_members where id=p_actor and enabled;
+  if actor.id is null or not public.bff_actor_can(p_actor,'BffProTransport:View') then raise exception 'BFF_FORBIDDEN'; end if;
+  select * into application from public.bff_applications
+    where tenant_id=actor.tenant_id and code='pro-transport-pilot' and enabled;
+  if application.id is null or (actor.role<>'admin' and not exists(select 1 from public.bff_application_members
+    where application_id=application.id and member_id=actor.id and tenant_id=actor.tenant_id)) then
+    raise exception 'BFF_FORBIDDEN';
+  end if;
+  return jsonb_build_object('applicationId',application.id,'tenantId',actor.tenant_id);
+end $$;
+revoke all on function public.bff_pro_transport_context(uuid) from public,anon,authenticated;
+grant execute on function public.bff_pro_transport_context(uuid) to service_role;
+do $pro_transport_pilot$
+declare actor record; page uuid; changed integer; affected integer;
+begin
+  for actor in select distinct on (tenant_id) id,tenant_id from public.bff_members
+    where enabled and role='admin' order by tenant_id,created_at,id loop
+    changed:=0;
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('bff-control:'||actor.tenant_id::text,0));
+    insert into public.bff_applications(tenant_id,code,name,description,home_url,enabled,created_by,updated_by)
+      values(actor.tenant_id,'pro-transport-pilot','pro 运输协同验证',
+        '只读聚合 TMS 调度提醒与 VMS 车辆、司机证照风险，不执行配载或修改业务状态。',
+        'https://art-si.github.io/art-supabase-pro/',true,actor.id,actor.id)
+      on conflict(tenant_id,code) do nothing;
+    select id into page from public.bff_menus where tenant_id=actor.tenant_id and name='BffApplications';
+    if page is not null then
+      insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
+        values(actor.tenant_id,page,'BffProTransport:View','button',
+          jsonb_build_object('title','pro 调度资源综合核验','isEnable',true),true,actor.id,actor.id)
+        on conflict(tenant_id,name) do nothing;
+      get diagnostics affected=row_count; changed:=changed+affected;
+    end if;
+    if changed>0 then perform public.bff_control_advance(actor.id,'menus','menu.pro_transport_pilot',page,'{}'::jsonb); end if;
+  end loop;
+end $pro_transport_pilot$;
+-- END BFF PRO TRANSPORT PILOT
 commit;
