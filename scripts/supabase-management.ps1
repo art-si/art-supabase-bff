@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('SyncWordmarkPermission','PrepareMemberDirectory','InspectBusinessDictionaries','SyncBusinessDictionaries','Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','InspectResources','InspectBffActivity','AuditBffSecurity','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation','EnableObservabilityNavigation','DisableObservabilityNavigation')][string]$Action = 'Inspect',
+  [ValidateSet('ValidateSessionRefresh','SyncSessionRefresh','SyncWordmarkPermission','PrepareMemberDirectory','InspectBusinessDictionaries','SyncBusinessDictionaries','Inspect','InspectAuthorization','InspectConsent','InspectDesignReferences','InspectBff','InspectMembers','InspectResources','InspectBffActivity','AuditBffSecurity','VerifyBff','ValidateBffSchema','ApplyCanonicalBff','ApplyBffSchema','EnableOAuth','RegisterOAuth','PrepareEnvironment','ProvisionMember','CleanupUpstreamFixtures','EnableUpstreamNavigation','EnableInterfaceNavigation','EnableReleaseNavigation','DisableReleaseNavigation','EnableBrandingNavigation','DisableBrandingNavigation','EnableResourceNavigation','DisableResourceNavigation','EnableObservabilityNavigation','DisableObservabilityNavigation')][string]$Action = 'Inspect',
   [string]$Login,
   [ValidateSet('admin','viewer')][string]$MemberRole = 'viewer',
   [string]$AppOrigin = 'http://localhost:3010',
@@ -194,6 +194,54 @@ select jsonb_build_object(
 ) as inspection
 '@
   Invoke-BffQuery $taskQuery | ConvertTo-Json -Depth 20
+  exit
+}
+if ($Action -in @('ValidateSessionRefresh','SyncSessionRefresh')) {
+  $taskMcp = Get-Content -Raw -LiteralPath '.mcp.json' | ConvertFrom-Json
+  if ($bffRef -ne 'bksbwnxdurmuolygiofh' -or $taskMcp.mcpServers.supabase.url -notmatch 'project_ref=bksbwnxdurmuolygiofh(?:&|$)') {
+    throw 'BFF session refresh project scope mismatch.'
+  }
+  $taskSource = Get-Content -Raw -Encoding UTF8 -LiteralPath 'server/database/schema.sql'
+  $taskBlock = [regex]::Match($taskSource,'(?s)-- SESSION REFRESH COORDINATION BEGIN\r?\n(.*?)-- SESSION REFRESH COORDINATION END')
+  if (!$taskBlock.Success) { throw 'Canonical session refresh coordination is missing.' }
+  $taskBaseline = @(Invoke-BffQuery @'
+select jsonb_build_object(
+  'sessions',jsonb_build_object('rls',c.relrowsecurity,'acl',c.relacl::text,'owner',pg_get_userbyid(c.relowner)),
+  'columns',(select coalesce(jsonb_agg(jsonb_build_object('name',a.attname,'type',format_type(a.atttypid,a.atttypmod),
+    'notNull',a.attnotnull,'default',pg_get_expr(d.adbin,d.adrelid)) order by a.attnum),'[]'::jsonb)
+    from pg_attribute a left join pg_attrdef d on d.adrelid=a.attrelid and d.adnum=a.attnum
+    where a.attrelid=c.oid and a.attnum>0 and not a.attisdropped and a.attname in ('refresh_lease_id','refresh_lease_until')),
+  'constraints',(select coalesce(jsonb_agg(pg_get_constraintdef(k.oid)),'[]'::jsonb) from pg_constraint k
+    where k.conrelid=c.oid and k.conname='bff_session_refresh_lease_pair'),
+  'functions',(select coalesce(jsonb_agg(jsonb_build_object('definition',pg_get_functiondef(p.oid),
+    'acl',p.proacl::text,'owner',pg_get_userbyid(p.proowner)) order by p.proname),'[]'::jsonb)
+    from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'
+    and p.proname in ('bff_session_refresh_claim','bff_session_refresh_finish'))
+) as snapshot from pg_class c where c.oid='public.bff_sessions'::regclass
+'@)
+  if ($taskBaseline.Count -ne 1 -or $taskBaseline[0].snapshot.sessions.rls -ne $true) {
+    throw 'Session refresh recovery baseline is invalid.'
+  }
+  $taskBackupDirectory = Join-Path (Get-Location) '.artifacts/database'
+  New-Item -ItemType Directory -Path $taskBackupDirectory -Force | Out-Null
+  $taskBackupPath = Join-Path $taskBackupDirectory ('bff-session-refresh-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '.json')
+  [IO.File]::WriteAllText($taskBackupPath,(@{project=$bffRef;snapshot=$taskBaseline[0].snapshot}|ConvertTo-Json -Depth 40),[Text.Encoding]::UTF8)
+  $taskRecovery = Get-Content -Raw -LiteralPath $taskBackupPath | ConvertFrom-Json
+  if ($taskRecovery.project -ne $bffRef -or $taskRecovery.snapshot.sessions.rls -ne $true -or
+    @($taskRecovery.snapshot.columns).Count -ne @($taskBaseline[0].snapshot.columns).Count) {
+    throw 'Session refresh recovery verification failed.'
+  }
+  $taskAssertions = Get-Content -Raw -Encoding UTF8 -LiteralPath 'tests/integration/session-refresh.sql'
+  $taskAssertions = [regex]::Replace($taskAssertions,'(?im)^\s*(begin|rollback);\s*$','')
+  $taskSeed = $taskBlock.Groups[1].Value
+  $null = Invoke-BffQuery ("begin;`n"+$taskSeed+"`n"+$taskSeed+"`n"+$taskAssertions+"`nrollback;")
+  if ($Action -eq 'ValidateSessionRefresh') {
+    Write-Output 'Session refresh canonical block, idempotency and lifecycle assertions passed inside ROLLBACK; no schema committed.'
+    exit
+  }
+  $null = Invoke-BffQuery ("begin;`n"+$taskSeed+"`ncommit;")
+  $null = Invoke-BffQuery ("begin;`n"+$taskAssertions+"`nrollback;")
+  Write-Output 'Session refresh coordination applied to the scoped BFF project; lifecycle and RPC privileges verified.'
   exit
 }
 if ($Action -eq 'SyncWordmarkPermission') {

@@ -3,6 +3,7 @@ import * as oidc from 'openid-client'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
 import { config, authReady } from './config'
 import { oidcIdentityFetch } from './identity-http'
+import { refreshSessionPayload } from './session-refresh'
 import { database, requireData } from './database/client'
 import { cookie, setCookie, redirect, HttpError } from './http'
 import {
@@ -259,13 +260,15 @@ export async function finishLogin(
   redirect(res, safeReturnPath(value.returnTo))
 }
 
-const refreshes = new Map<string, Promise<Tokens>>()
 async function refresh(row: SessionRow, tokens: Tokens): Promise<Tokens> {
-  const existing = refreshes.get(row.token_hash)
-  if (existing) return existing
-  const task = (async () => {
-    if (!tokens.refreshToken) throw new HttpError(401, '登录已过期，请重新登录')
-    const settings = await getProvider()
+  if (!tokens.refreshToken) throw new HttpError(401, '登录已过期，请重新登录', 'UNAUTHENTICATED')
+  const settings = await getProvider().catch((cause: unknown) => {
+    if (cause instanceof HttpError) throw cause
+    throw new HttpError(503, '身份中心暂时无法连接，请稍后重试', 'AUTH_SESSION_UNAVAILABLE', {
+      cause
+    })
+  })
+  const payload = await refreshSessionPayload(row, async () => {
     const updated = await oidc.refreshTokenGrant(settings, tokens.refreshToken)
     await oidc.fetchUserInfo(settings, updated.access_token, tokens.subject)
     const next: Tokens = {
@@ -274,36 +277,12 @@ async function refresh(row: SessionRow, tokens: Tokens): Promise<Tokens> {
       refreshToken: updated.refresh_token || tokens.refreshToken,
       expiresAt: Date.now() + (updated.expires_in || 3600) * 1000
     }
-    requireData(
-      await database
-        .from('bff_sessions')
-        .update({ payload: seal(next, config.sessionKey) })
-        .eq('token_hash', row.token_hash)
-        .select('token_hash')
-        .single()
-    )
-    return next
-  })()
-  refreshes.set(row.token_hash, task)
-  try {
-    return await task
-  } catch (error) {
-    if (
-      error instanceof oidc.ResponseBodyError &&
-      ['invalid_grant', 'invalid_token'].includes(error.error)
-    ) {
-      const result = await database.from('bff_sessions').delete().eq('token_hash', row.token_hash)
-      if (result.error)
-        throw new AggregateError([error, result.error], '会话失效处理失败', { cause: error })
-      throw new HttpError(401, '登录已过期，请重新登录', 'UNAUTHENTICATED', { cause: error })
-    }
-    if (error instanceof HttpError) throw error
-    throw new HttpError(503, '身份中心暂时无法连接，请重新登录', 'AUTH_SESSION_UNAVAILABLE', {
-      cause: error
-    })
-  } finally {
-    refreshes.delete(row.token_hash)
-  }
+    return seal(next, config.sessionKey)
+  })
+  const next = parseTokens(unseal(payload, config.sessionKey))
+  if (next.subject !== tokens.subject) throw new HttpError(401, '登录身份不匹配', 'UNAUTHENTICATED')
+  row.payload = payload
+  return next
 }
 
 export function sessionSnapshot(value: unknown): { row: SessionRow; member: Member } {
