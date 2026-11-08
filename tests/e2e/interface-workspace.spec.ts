@@ -1,3 +1,4 @@
+import { checkPaginationLayouts } from '../fixtures/pagination-layout'
 import { dictionarySnapshot } from '../fixtures/dictionaries'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
@@ -705,4 +706,9 @@ test('business response and GET page contract save a whitelist and show paged te
   await expect(testDialog.getByText('DO_NOT_DISPLAY')).toHaveCount(0)
   expect(state.unexpected).toEqual([])
   expect(state.errors).toEqual([])
+})
+
+test('pagination stays at the bottom of the workspace', async ({ page }) => {
+  await mockApi(page)
+  await checkPaginationLayouts(page, '/interfaces')
 })

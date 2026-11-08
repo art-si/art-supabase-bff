@@ -1,3 +1,4 @@
+import { checkPaginationLayouts } from '../fixtures/pagination-layout'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
@@ -612,4 +613,9 @@ test('release workspace preserves focus controls and scrollable dialog footer ac
   await page.screenshot({ path: path.join(artifactRoot, 'release-mobile-history-390.png') })
   expect(state.unexpected).toEqual([])
   expect(state.errors).toEqual([])
+})
+
+test('pagination stays at the bottom of the workspace', async ({ page }) => {
+  await mockApi(page)
+  await checkPaginationLayouts(page, '/releases')
 })

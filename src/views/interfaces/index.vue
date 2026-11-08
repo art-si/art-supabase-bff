@@ -11,7 +11,12 @@
         { label: '版本绑定上游配置', type: 'success', effect: 'light' }
       ]"
     >
-      <template #actions><BusinessTableWorkspaceActions :table="tableQueryRef" /></template>
+      <template #actions
+        ><BffFlowGuide
+          :step="2"
+          :application-id="filters.applicationId" /><BusinessTableWorkspaceActions
+          :table="tableQueryRef"
+      /></template>
     </BusinessWorkspaceHeader>
     <ElAlert v-if="optionsError" type="warning" :closable="false" show-icon>
       <template #title>编排选项暂时无法加载</template>
@@ -75,6 +80,7 @@
 </template>
 
 <script setup lang="tsx">
+  import BffFlowGuide from '@bff/components/bff-flow-guide.vue'
   import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
   import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
   import ArtDictDisplay from '@/components/core/base/art-dict-display/index.vue'
@@ -138,7 +144,19 @@
   const visibleRecords = shallowRef<InterfaceRecord[]>([])
   const busyRowId = ref('')
   const showSearchBar = ref(true)
-  const filters = ref({ name: '', applicationId: '', environment: '', validationStatus: '' })
+  const filters = ref({
+    name: '',
+    applicationId: typeof route.query.applicationId === 'string' ? route.query.applicationId : '',
+    environment: '',
+    validationStatus: ''
+  })
+  watch(
+    () => route.query.applicationId,
+    (value) => {
+      filters.value.applicationId = typeof value === 'string' ? value : ''
+      void tableQueryRef.value?.refreshCreate()
+    }
+  )
   const locatedRecordId = computed(() =>
     typeof route.query.recordId === 'string' ? route.query.recordId : ''
   )
@@ -146,7 +164,12 @@
     () => visibleRecords.value.find((row) => row.id === locatedRecordId.value)?.name || '指定接口'
   )
   watch(locatedRecordId, () => {
-    filters.value = { name: '', applicationId: '', environment: '', validationStatus: '' }
+    filters.value = {
+      name: '',
+      applicationId: typeof route.query.applicationId === 'string' ? route.query.applicationId : '',
+      environment: '',
+      validationStatus: ''
+    }
     void tableQueryRef.value?.refreshCreate()
   })
   function clearLocate(): void {
@@ -182,9 +205,9 @@
     },
     {
       key: 'tested',
-      label: '测试通过',
+      label: '已测试',
       value: summary.value.tested,
-      description: '最近一次试跑成功',
+      description: '当前草稿已执行试跑',
       icon: 'ri:flask-line',
       tone: 'info',
       loading: !loaded.value

@@ -47,6 +47,8 @@ function networkMessage(code: string): string {
       return '目标地址被网络安全策略阻止'
     case 'timeout':
       return '调用超时，请检查上游状态或调整编排'
+    case 'connection_failed':
+      return '无法连接上游，请确认服务已启动且地址、端口可达；启用配置不会自动启动上游服务'
     case 'redirect_blocked':
       return '上游返回重定向，请配置最终地址'
     case 'response_too_large':

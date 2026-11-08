@@ -91,7 +91,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
   const requestId = url.pathname.startsWith('/api/gateway/') ? randomUUID() : undefined
   if (requestId) res.setHeader('X-Request-Id', requestId)
   try {
-    if (url.pathname === '/api/health' && req.method === 'GET') {
+    if (['/api/health', '/api/health/'].includes(url.pathname) && req.method === 'GET') {
       json(res, {
         status: 'ok',
         authenticationConfigured: authReady(),

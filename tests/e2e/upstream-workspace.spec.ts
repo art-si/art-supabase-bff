@@ -1,3 +1,4 @@
+import { checkPaginationLayouts } from '../fixtures/pagination-layout'
 import { dictionarySnapshot } from '../fixtures/dictionaries'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
@@ -416,4 +417,12 @@ test('draft creation, metadata edit and write-only credential rotation', async (
   await expect(page.getByText('连接正常。检测仅验证网络连通性，不验证上游认证。')).toHaveCount(0)
   expect(state.unexpected).toEqual([])
   expect(state.pageErrors).toEqual([])
+})
+
+test('pagination stays at the bottom of the workspace', async ({ page }) => {
+  await mockUpstreamApi(page, true)
+  await checkPaginationLayouts(page, '/upstreams')
+  await page.getByRole('button', { name: '更多操作' }).first().click()
+  await expect(page.getByRole('menuitem', { name: '检测连接' }).locator('svg')).toBeVisible()
+  await page.screenshot({ path: '.artifacts/ui/upstream-menu-icons.png' })
 })

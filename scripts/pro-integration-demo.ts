@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { demoResponder } from './pro-demo-responder'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isObjectRecord } from 'art-supabase-pro/src/utils/record.ts'
@@ -556,54 +556,6 @@ async function verifyAndPublish(
     })
   )
   console.log(`Published local ${kind} page with two safe rows.`)
-}
-function demoResponder() {
-  return createServer((req, res) => {
-    const url = new URL(req.url || '/', responderOrigin)
-    const offsetText = url.searchParams.get('offset')
-    const limitText = url.searchParams.get('limit')
-    const offset = Number(offsetText)
-    const limit = Number(limitText)
-    if (
-      req.method !== 'GET' ||
-      !kinds.some((kind) => url.pathname === `/${kind}`) ||
-      url.searchParams.size !== 2 ||
-      !offsetText ||
-      !/^(0|[1-9]\d*)$/.test(offsetText) ||
-      !Number.isSafeInteger(offset) ||
-      offset > 100_000_000 ||
-      !limitText ||
-      !/^[1-9]\d*$/.test(limitText) ||
-      !Number.isSafeInteger(limit) ||
-      limit > 100 ||
-      req.headers.authorization ||
-      req.headers.cookie
-    ) {
-      res.writeHead(400).end()
-      return
-    }
-    const kind = url.pathname.slice(1) as Kind
-    const rows = [1, 2]
-      .map((number) => ({ id: `${kind}-${number}`, name: `${kind} 示例 ${number}` }))
-      .slice(offset, offset + limit)
-    const value =
-      kind === 'java'
-        ? { code: 0, data: { records: rows, total: 2 } }
-        : kind === 'cloudbase'
-          ? { result: { code: 0, data: { list: rows, total: 2 } } }
-          : rows
-    if (kind === 'supabase' && req.headers.prefer !== 'count=exact') {
-      res.writeHead(400).end()
-      return
-    }
-    res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      ...(kind === 'supabase'
-        ? { 'Content-Range': rows.length ? `${offset}-${offset + rows.length - 1}/2` : '*/2' }
-        : {})
-    })
-    res.end(JSON.stringify(value))
-  })
 }
 async function main(): Promise<void> {
   assertLocalPolicy()

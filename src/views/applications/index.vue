@@ -11,7 +11,9 @@
         { label: '独立应用授权', type: 'info' }
       ]"
     >
-      <template #actions><BusinessTableWorkspaceActions :table="tableQueryRef" /></template>
+      <template #actions
+        ><BffFlowGuide :step="0" /><BusinessTableWorkspaceActions :table="tableQueryRef"
+      /></template>
     </BusinessWorkspaceHeader>
     <div class="application-page__workspace business-workspace-content min-h-0 flex-1">
       <ArtTableQuery
@@ -36,6 +38,7 @@
   </div>
 </template>
 <script setup lang="tsx">
+  import BffFlowGuide from '@bff/components/bff-flow-guide.vue'
   import ArtDictDisplay from '@/components/core/base/art-dict-display/index.vue'
   import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
   import ArtButtonTable from '@/components/core/forms/art-button-table/index.vue'
@@ -53,6 +56,7 @@
   import ApplicationMembersDialog from './modules/application-members-dialog.vue'
   import type { ApplicationDialogExpose, ApplicationMembersDialogExpose } from './modules/types'
   const { hasAuth } = useAuth()
+  const router = useRouter()
   const tableQueryRef = ref<ArtTableQueryExpose>(),
     applicationDialogRef = ref<ApplicationDialogExpose>(),
     membersDialogRef = ref<ApplicationMembersDialogExpose>()
@@ -138,7 +142,9 @@
         minWidth: 160,
         formatter: (row) => new Date(row.updatedAt).toLocaleString('zh-CN', { hour12: false })
       },
-      ...(hasAuth('BffApplication:Edit') || hasAuth('BffApplication:Grant')
+      ...(hasAuth('BffApplication:Edit') ||
+      hasAuth('BffApplication:Grant') ||
+      hasAuth('BffUpstream:View')
         ? [
             {
               prop: 'actions',
@@ -147,6 +153,17 @@
               fixed: 'right',
               formatter: (row: BffApplication) => (
                 <BusinessTableRowActions>
+                  {hasAuth('BffUpstream:View') && (
+                    <ArtButtonTable
+                      type="view"
+                      icon="ri:route-line"
+                      label="配置应用接入"
+                      permission="BffUpstream:View"
+                      onClick={() =>
+                        router.push({ path: '/upstreams', query: { applicationId: row.id } })
+                      }
+                    />
+                  )}
                   {hasAuth('BffApplication:Edit') && (
                     <ArtButtonTable
                       type="edit"

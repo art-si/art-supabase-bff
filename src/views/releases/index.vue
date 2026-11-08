@@ -11,7 +11,12 @@
         { label: '版本与事件可追溯', type: 'success', effect: 'light' }
       ]"
     >
-      <template #actions><BusinessTableWorkspaceActions :table="tableQueryRef" /></template>
+      <template #actions
+        ><BffFlowGuide
+          :step="3"
+          :application-id="filters.applicationId" /><BusinessTableWorkspaceActions
+          :table="tableQueryRef"
+      /></template>
     </BusinessWorkspaceHeader>
     <ElAlert v-if="optionsError" type="warning" :closable="false" show-icon>
       <template #title>应用与环境选项暂时无法加载</template>
@@ -58,6 +63,7 @@
 </template>
 
 <script setup lang="tsx">
+  import BffFlowGuide from '@bff/components/bff-flow-guide.vue'
   import { ElButton, ElMessage, ElTag } from 'element-plus'
   import { useAuth } from '@/hooks/core/useAuth'
   import { notifyFriendlyError } from '@/hooks/core/useArtFeedback'
@@ -105,7 +111,19 @@
   const records = shallowRef<ReleaseRecord[]>([])
   const loaded = ref(false)
   const showSearchBar = ref(true)
-  const filters = ref({ name: '', applicationId: '', environment: '', status: '' })
+  const filters = ref({
+    name: '',
+    applicationId: typeof route.query.applicationId === 'string' ? route.query.applicationId : '',
+    environment: '',
+    status: ''
+  })
+  watch(
+    () => route.query.applicationId,
+    (value) => {
+      filters.value.applicationId = typeof value === 'string' ? value : ''
+      void tableQueryRef.value?.refreshCreate()
+    }
+  )
   const locatedRecordId = computed(() =>
     typeof route.query.recordId === 'string' ? route.query.recordId : ''
   )
@@ -114,7 +132,12 @@
       records.value.find((item) => item.interfaceId === locatedRecordId.value)?.name || '指定接口'
   )
   watch(locatedRecordId, () => {
-    filters.value = { name: '', applicationId: '', environment: '', status: '' }
+    filters.value = {
+      name: '',
+      applicationId: typeof route.query.applicationId === 'string' ? route.query.applicationId : '',
+      environment: '',
+      status: ''
+    }
     void tableQueryRef.value?.refreshCreate()
   })
   function clearLocate(): void {

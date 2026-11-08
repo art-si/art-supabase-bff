@@ -8,6 +8,7 @@
     "pnpm": ">=11.28.2"
   },
   "scripts": {
+    "demo:serve": "node --import tsx scripts/pro-demo-responder.ts",
     "dev": "node node_modules/tsx/dist/cli.mjs watch --clear-screen=false --include vite.config.ts --include .env.local --exclude src/views/** --exclude src/api/** --exclude src/router/** --exclude src/main.ts --exclude docs/** --exclude .artifacts/** --env-file-if-exists=.env.local --use-env-proxy server/index.ts",
     "build": "vite build",
     "start": "node --use-env-proxy --import tsx server/index.ts --production",
@@ -30,7 +31,7 @@
     "@element-plus/icons-vue": "^2.3.2",
     "@supabase/supabase-js": "^2.117.3",
     "@vueuse/core": "^15.0.0",
-    "art-supabase-pro": "https://gitee.com/art-si/art-supabase-pro/repository/archive/d6e0fe0c3b0e634f01ce5b539d0fb56b4918fb99.tar.gz",
+    "art-supabase-pro": "https://gitee.com/art-si/art-supabase-pro/repository/archive/af6963dc3466506727456b51bfe38833be9189b5.tar.gz",
     "dayjs": "^1.11.23",
     "dotenv": "17.4.2",
     "dotenv-expand": "12.0.3",

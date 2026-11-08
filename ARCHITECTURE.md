@@ -2,6 +2,20 @@
 
 ## 当前交付状态（2026-11-07）
 
+### 2026-11-08：分页、流程引导与本地演示恢复
+
+- 完成真实线上 Pro 页面验收：用户登录 GitHub Pages 的「BFF 接入中心」后，页面读取到 4 个授权接口，并成功执行「线上平台健康检查」，显示 `status: ok`、V1 和请求编号 `a0330190-51fd-4fe0-a425-1a38ec6c51a2`。
+- 修正验证上游的连接检测地址：站点根路径会返回登录重定向 HTTP 303，现将服务基础地址改为 `https://bff-platform.netlify.app/api/health`，步骤使用 `/`；健康入口同时支持末尾斜杠。Netlify 部署 `6af05c0468012554ce3b5a66` 后，真实检测返回 reachable/HTTP 200，配置重新验证与发布为 V2，线上调用返回 HTTP 200 与 `{status:'ok'}`，请求编号 `3496d606-632d-4087-b7c7-a7df8a54778d`。没有放宽重定向或出站网络规则。
+
+- 线上接入：Pro `bff-gateway` 已部署到身份项目 `ckbftoopuyophiebamwy`，只通过 Auth.getUser 验证身份并签名转发；`BFF_SERVICE_URL` 指向 `https://bff-platform.netlify.app`。Netlify 已配置匹配的专用桥接密钥与精确上游允许源站，未修改身份数据库 schema。
+- Pro 生产入口由 `b5b4c5fef98e8d67d37ea146cf7e119153edca26` 开启，GitHub Pages 发布成功；BFF 更新部署为 `6af05631275a7f927af6ffa6`。新增「线上接入验证 / 线上平台健康检查」生产 GET 接口，只输出公开健康状态。服务端签名调用线上 BFF 返回 HTTP 200、V1 与 `{status:'ok'}`；请求编号 `633c59ac-8088-4875-87a8-f96ffd17a807`。此证据是服务器调用验收，真实 Pro 登录页面调用另行记录。
+
+- BFF 固定消费 Pro 修复提交 `af6963dc3466506727456b51bfe38833be9189b5`。ArtTableQuery 的 Flex 工作区覆盖 ArtTable 内部重复扣减的内联高度；窄屏文档流使用有界表格区域。没有保留 BFF 页面专用分页样式。
+- 应用、上游、接口、发布四个列表在 1920×878、1440×900、1280×800 和专注模式下的分页底部距离检查通过；原有发布页浅色/深色、窄屏与弹窗滚动回归通过。17 项相关浏览器用例均已通过（首次并发运行的 2 项超时后单独重跑通过），类型检查、UI 审查、共享源码边界与构建通过。
+- 四个页面新增带图标的「使用流程」抽屉，应用行入口与流程链接保留应用筛选。上游「检测连接」改用已收录的 `ri:heart-pulse-line`。接口汇总原先将已测试数量标成测试通过，现按既有统计口径显示「已测试」。
+- 本地三种格式的演示依赖 `127.0.0.1:33445` 常驻进程。新增 `pnpm demo:serve` 复用唯一响应器，单独运行不操作数据库；根地址提供健康检测。已在真实 BFF 会话完成 CloudBase、Supabase、Java 的 GET 分页测试，各返回两条白名单记录。原连接失败并非接口映射失效。
+- Pro 本地接入开关、代理、目标地址与专用桥接密钥已核对匹配，3037 桥接进程可启动。验证时 Pro 主目录存在既有未完成合并（package.json 与生成快照），package.json 冲突导致 3006 页面加载 500；本轮未覆盖该工作区的合并状态。Pro 前端端到端验收仍需在该合并完成后进行。
+
 - Windows 开发启动改用现有 `tsx watch`，由它监听后端依赖、Vite 配置与环境文件；前端热更新继续由 Vite 负责，生成目录和页面源码不会触发后端重启。移除 Node 原生 `--watch-path` 与环境文件监听组合引起的启动循环。实际验证：生成文件和前端变更保持后端 PID；后端文件变更仅重启一次，健康与入口请求均返回 200，前端初始化约 2–3 秒。
 
 - 当前 npm 主仓固定为 Pro 1.1.2（提交 `d6e0fe0c3b0e634f01ce5b539d0fb56b4918fb99`）。共享品牌配置、Logo/favicon、SSO 前置入口和公共 ArtTableQuery 分页 footer 均位于 pro；BFF 没有复制这些页面或表格实现。Pro 公共分页修正已随 BFF `719f0e1` 构建并部署到 Netlify。
@@ -195,7 +209,6 @@ OAuth Server 已开启，机密客户端已注册。默认 Site URL 为当前有
 - 独立的 8 项单元测试覆盖实际 `authenticate` 链路、不同模块实例的刷新竞争、同实例合并、等待上限、退出/停用、迟到失效、新持有者保护和故障封闭。本地隔离 PostgreSQL 已执行同一规范区块两次及 `tests/integration/session-refresh.sql`，验证幂等、租约恢复、会话到期、权限及测试数据回滚；这不能替代线上多连接验收。
 - `ValidateSessionRefresh` 只执行事务回滚验证；`SyncSessionRefresh` 保存并回读原列、约束、RPC 定义和授权的恢复资料后，先重复回滚验证，再仅提交该区块并复核。两者都限定 BFF 项目，不向 pro 执行结构语句。
 - 实库 SQL 门禁已在正式 BFF 项目通过：16 路 lease 竞争、持有者重放、跨租户互不干扰、超时接管、停用及退出防复活，隔离 fixtures 已回滚；列和 RPC 权限复核通过。`tests/integration/session-refresh-http.ts` 的本地 REST 写入因网络 `ECONNRESET` 未完成，但不影响已完成的真实数据库锁/CAS 门禁。
-
 
 # Pro transport pilot
 

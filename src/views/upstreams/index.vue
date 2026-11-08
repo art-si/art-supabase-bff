@@ -11,7 +11,12 @@
         { label: '凭据仅写入服务端', type: 'success', effect: 'light' }
       ]"
     >
-      <template #actions><BusinessTableWorkspaceActions :table="tableQueryRef" /></template>
+      <template #actions
+        ><BffFlowGuide
+          :step="1"
+          :application-id="filters.applicationId" /><BusinessTableWorkspaceActions
+          :table="tableQueryRef"
+      /></template>
     </BusinessWorkspaceHeader>
 
     <ElAlert v-if="optionsError" type="warning" :closable="false" show-icon>
@@ -90,6 +95,7 @@
 </template>
 
 <script setup lang="tsx">
+  import BffFlowGuide from '@bff/components/bff-flow-guide.vue'
   import { useDictionaryOptions } from '@/hooks/core/useDictionaryOptions'
   import { BFF_DICTIONARIES } from '@bff/config/dictionaries'
   import ArtDictDisplay from '@/components/core/base/art-dict-display/index.vue'
@@ -159,7 +165,19 @@
   const visibleRecords = shallowRef<UpstreamService[]>([])
   const busyRowId = ref('')
   const showSearchBar = ref(true)
-  const filters = ref({ applicationId: '', name: '', environment: '', status: '' })
+  const filters = ref({
+    applicationId: typeof route.query.applicationId === 'string' ? route.query.applicationId : '',
+    name: '',
+    environment: '',
+    status: ''
+  })
+  watch(
+    () => route.query.applicationId,
+    (value) => {
+      filters.value.applicationId = typeof value === 'string' ? value : ''
+      void tableQueryRef.value?.refreshCreate()
+    }
+  )
   const locatedRecordId = computed(() =>
     typeof route.query.recordId === 'string' ? route.query.recordId : ''
   )
@@ -167,7 +185,12 @@
     () => visibleRecords.value.find((row) => row.id === locatedRecordId.value)?.name || '指定服务'
   )
   watch(locatedRecordId, () => {
-    filters.value = { applicationId: '', name: '', environment: '', status: '' }
+    filters.value = {
+      applicationId: typeof route.query.applicationId === 'string' ? route.query.applicationId : '',
+      name: '',
+      environment: '',
+      status: ''
+    }
     void tableQueryRef.value?.refreshCreate()
   })
   function clearLocate(): void {
@@ -415,7 +438,7 @@
       {
         key: 'test',
         label: '检测连接',
-        icon: 'ri:heartbeat-line',
+        icon: 'ri:heart-pulse-line',
         auth: 'BffUpstream:Test',
         disabled: Boolean(busyRowId.value) || !canTest
       },

@@ -1,3 +1,4 @@
+import { checkPaginationLayouts } from '../fixtures/pagination-layout'
 import { dictionarySnapshot } from '../fixtures/dictionaries'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
@@ -200,4 +201,9 @@ test('application focus mode and member authorization keep shared layout in ligh
   await page.waitForTimeout(350)
   await page.screenshot({ path: path.join(artifactRoot, 'application-members-mobile-390.png') })
   expect(state.errors).toEqual([])
+})
+
+test('pagination stays at the bottom of the workspace', async ({ page }) => {
+  await mockApplications(page)
+  await checkPaginationLayouts(page, '/applications')
 })

@@ -41,6 +41,14 @@
         :gutter="18"
         label-position="top"
       />
+      <ElAlert
+        v-if="record?.code.startsWith('demo-pro-integration-')"
+        title="本地演示：先在 BFF 项目运行 pnpm demo:serve 并保持运行，再填写页码 1、页长 20。"
+        description="这三种格式使用本机示例服务，不会连接真实 Java、Supabase 或 CloudBase 业务系统。"
+        type="info"
+        :closable="false"
+        show-icon
+      />
       <ElAlert v-if="testError" :title="testError" type="error" :closable="false" show-icon />
       <template v-if="result">
         <ElAlert
