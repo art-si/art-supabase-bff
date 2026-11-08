@@ -56,6 +56,73 @@ create table if not exists public.bff_sessions (
   created_at timestamptz not null default now()
 );
 create index if not exists bff_sessions_member_idx on public.bff_sessions(member_id);
+-- SESSION REFRESH COORDINATION BEGIN
+alter table public.bff_sessions add column if not exists refresh_lease_id uuid;
+alter table public.bff_sessions add column if not exists refresh_lease_until timestamptz;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conrelid='public.bff_sessions'::regclass and conname='bff_session_refresh_lease_pair') then
+    alter table public.bff_sessions add constraint bff_session_refresh_lease_pair
+      check ((refresh_lease_id is null) = (refresh_lease_until is null));
+  end if;
+end $$;
+
+create or replace function public.bff_session_refresh_claim(p_token_hash text,p_payload text,p_lease uuid)
+returns jsonb language plpgsql security definer set search_path='' set lock_timeout='2s' as $$
+declare target public.bff_sessions;
+begin
+  if p_token_hash is null or p_token_hash !~ '^[a-f0-9]{64}$' or p_lease is null
+    or p_payload is null or length(p_payload) not between 1 and 131072 then
+    raise exception using errcode='22023',message='Invalid session refresh request';
+  end if;
+  select * into target from public.bff_sessions where token_hash=p_token_hash for update;
+  if not found or target.expires_at<=clock_timestamp() or not exists (
+    select 1 from public.bff_members m where m.id=target.member_id and m.enabled
+  ) then return jsonb_build_object('status','missing'); end if;
+  if target.payload<>p_payload then
+    return jsonb_build_object('status','updated','payload',target.payload);
+  end if;
+  if target.refresh_lease_id=p_lease and target.refresh_lease_until>clock_timestamp() then
+    return jsonb_build_object('status','claimed');
+  end if;
+  if target.refresh_lease_until>clock_timestamp() then
+    return jsonb_build_object('status','busy');
+  end if;
+  update public.bff_sessions set refresh_lease_id=p_lease,
+    refresh_lease_until=clock_timestamp()+interval '90 seconds' where token_hash=p_token_hash;
+  return jsonb_build_object('status','claimed');
+end $$;
+
+-- A null replacement means a verified invalid OAuth refresh grant; only its holder may revoke.
+create or replace function public.bff_session_refresh_finish(p_token_hash text,p_payload text,p_lease uuid,p_next_payload text)
+returns jsonb language plpgsql security definer set search_path='' set lock_timeout='2s' as $$
+declare target public.bff_sessions;
+begin
+  if p_token_hash is null or p_token_hash !~ '^[a-f0-9]{64}$' or p_lease is null
+    or p_payload is null or length(p_payload) not between 1 and 131072
+    or (p_next_payload is not null and length(p_next_payload) not between 1 and 131072) then
+    raise exception using errcode='22023',message='Invalid session refresh request';
+  end if;
+  select * into target from public.bff_sessions where token_hash=p_token_hash for update;
+  if not found or target.expires_at<=clock_timestamp() or not exists (
+    select 1 from public.bff_members m where m.id=target.member_id and m.enabled
+  ) then return jsonb_build_object('status','missing'); end if;
+  if target.payload<>p_payload then
+    return jsonb_build_object('status','updated','payload',target.payload);
+  end if;
+  if target.refresh_lease_id is distinct from p_lease then
+    return jsonb_build_object('status','busy');
+  end if;
+  if p_next_payload is null then
+    delete from public.bff_sessions where token_hash=p_token_hash;
+    return jsonb_build_object('status','missing');
+  end if;
+  update public.bff_sessions set payload=p_next_payload,refresh_lease_id=null,refresh_lease_until=null
+    where token_hash=p_token_hash;
+  return jsonb_build_object('status','updated','payload',p_next_payload);
+end $$;
+revoke all on function public.bff_session_refresh_claim(text,text,uuid),public.bff_session_refresh_finish(text,text,uuid,text) from public,anon,authenticated;
+grant execute on function public.bff_session_refresh_claim(text,text,uuid),public.bff_session_refresh_finish(text,text,uuid,text) to service_role;
+-- SESSION REFRESH COORDINATION END
 create table if not exists public.bff_audit_events (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null,
