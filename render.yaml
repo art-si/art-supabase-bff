@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: art-supabase-bff
+    name: bff-platform
     runtime: node
     plan: free
     branch: master
