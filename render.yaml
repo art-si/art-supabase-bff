@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: art-supabase-bff
+    runtime: node
+    plan: free
+    branch: master
+    buildCommand: corepack pnpm install --frozen-lockfile --prod=false && corepack pnpm build && corepack pnpm verify:bundle
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: 'off'
+    envVars:
+      - key: NODE_VERSION
+        value: 24.22.1
+      - key: NODE_ENV
+        value: production
+      - key: BFF_HOST
+        value: 0.0.0.0
+      - key: BFF_AUTH_ISSUER
+        value: https://ckbftoopuyophiebamwy.supabase.co/auth/v1
+      - key: BFF_AUTH_UI_URL
+        value: https://art-si.github.io/art-supabase-pro/#/auth/oauth-consent
+      - key: BFF_SUPABASE_URL
+        value: https://bksbwnxdurmuolygiofh.supabase.co
+      - key: BFF_AUTH_CLIENT_ID
+        sync: false
+      - key: BFF_AUTH_CLIENT_SECRET
+        sync: false
+      - key: BFF_SESSION_KEY
+        sync: false
+      - key: BFF_SUPABASE_SERVICE_KEY
+        sync: false
+      - key: BFF_IDENTITY_DIRECTORY_SERVICE_KEY
+        sync: false
+      - key: BFF_CREDENTIAL_KEY_ID
+        value: v1
+      - key: BFF_CREDENTIAL_KEYS
+        sync: false

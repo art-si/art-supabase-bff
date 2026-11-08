@@ -612,7 +612,7 @@ const server = createServer((req, res) => {
 try {
   const started = performance.now()
   const listening = once(server, 'listening')
-  server.listen(config.port, '127.0.0.1')
+  server.listen(config.port, config.host)
   await listening
   stopResourceCleanup = startResourceCleanup()
   console.log(`BFF platform: ${config.origin}`)

@@ -10,6 +10,19 @@
 - pro 的业务角色不会自动变成 BFF 管理权限。BFF 使用自己的租户成员和应用授权。
 - 通过 art-supabase-pro npm 依赖复用主仓入口、Art 组件、Hooks、主题、布局、菜单 Store、工作标签页和动态路由注册器。BFF 仅保留业务页面、同源 API 和服务端会话接入，不保留公共实现副本。
 
+## Render 免费演示部署
+
+仓库根目录的 `render.yaml` 定义一个免费 Node Web Service，同时提供前端和同源 API；不新建 Render 数据库，继续使用既有 BFF Supabase 项目。
+
+1. 使用 GitHub 账号登录 Render，授权访问 Gitee 镜像对应的 GitHub 仓库；新建 Blueprint，选择该仓库的 `master` 分支和 `render.yaml`。
+2. 核对实例为 **Free**。配置页面中填写服务端 OAuth 客户端、Supabase 和加密配置；沿用现有环境的密钥与密钥版本，不重新生成覆盖既有加密数据。密钥只填 Render 的 Environment，不提交仓库或填入 `VITE_` 变量。
+3. 由 Render 分配 HTTPS 地址。未指定 `BFF_ORIGIN` 时服务读取平台的 `RENDER_EXTERNAL_URL`；自行绑定域名后显式配置 `BFF_ORIGIN`。在 pro 对应 OAuth 客户端中增加该域名下精确的 `/api/auth/callback`，保留仍在使用的本地回调。
+4. 部署后检查 `/api/health`、真实登录、菜单、图片上传与保存。不以健康检查成功替代登录验收。
+
+监听地址由 `BFF_HOST` 控制：本地默认 `127.0.0.1`，Render 配置 `0.0.0.0`；端口依次读取 `BFF_PORT`、Render `PORT`、本地默认 `3010`。Render 不应复制本地的 `BFF_PORT=3010` 或 `BFF_ORIGIN=http://localhost:3010`。
+
+免费服务闲置会休眠，首次访问可能需要约一分钟启动；休眠期间自动告警评估和清理任务也暂停。持久数据和图片使用 Supabase，不依赖 Render 本机文件。此配置用于演示，默认关闭自动部署，验证后再按需要启用；未配置上游允许列表时保持不允许访问外部上游。
+
 ## 本地运行
 
 需要 Node.js 22.21 或更高版本、pnpm 11.28.2。

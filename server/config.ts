@@ -5,7 +5,7 @@ const env = {
   ...loadEnv(production ? 'production' : 'development', process.cwd(), ''),
   ...process.env
 }
-const port = Number(env.BFF_PORT || 3010)
+const port = Number(env.BFF_PORT || env.PORT || 3010)
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('BFF_PORT 必须为有效端口')
 
 /** The public origin is configured by the operator, never taken from request Host headers. */
@@ -29,7 +29,7 @@ export function resolveBffOrigin(
     throw new Error('BFF_ORIGIN 必须为 HTTPS 源站地址；本地开发可使用 localhost 的 HTTP 地址')
   return target.origin
 }
-const origin = resolveBffOrigin(env.BFF_ORIGIN, production, port)
+const origin = resolveBffOrigin(env.BFF_ORIGIN || env.RENDER_EXTERNAL_URL, production, port)
 const alertWorkerIntervalMs = Number(env.BFF_ALERT_WORKER_INTERVAL_MS || 60_000)
 if (
   !Number.isSafeInteger(alertWorkerIntervalMs) ||
@@ -39,6 +39,7 @@ if (
   throw new Error('BFF_ALERT_WORKER_INTERVAL_MS 必须在 30000–900000 毫秒之间')
 export const config = {
   port,
+  host: env.BFF_HOST || '127.0.0.1',
   origin,
   browserOutputDir: env.VITE_OUT_DIR || 'docs',
   issuer: env.BFF_AUTH_ISSUER || 'https://ckbftoopuyophiebamwy.supabase.co/auth/v1',
