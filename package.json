@@ -18,7 +18,7 @@
     "test:e2e": "playwright test --config tests/playwright.config.ts",
     "verify:bundle": "tsx tests/integration/browser-bundle-security.ts",
     "ui:audit": "tsx node_modules/art-supabase-pro/scripts/ui-audit.ts",
-    "lint": "eslint src server tests vite.config.ts",
+    "lint": "eslint src server netlify/functions tests vite.config.ts",
     "clean:local": "powershell.exe -NoProfile -File scripts/clean-local-artifacts.ps1",
     "boundary:audit": "node node_modules/art-supabase-pro/scripts/platform-consumer.mjs",
     "skills:link": "node node_modules/art-supabase-pro/scripts/platform-consumer.mjs --link-skills",
@@ -38,6 +38,7 @@
     "lodash-es": "^4.18.1",
     "openid-client": "6.8.9",
     "pinia": "4.0.3",
+    "serverless-http": "4.0.0",
     "vue": "^3.5.43",
     "vue-router": "^5.4.0"
   },

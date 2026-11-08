@@ -5,6 +5,7 @@
     "types": ["node"]
   },
   "include": [
+    "netlify/functions/**/*.ts",
     "server/**/*.ts",
     "tests/unit/**/*.ts",
     "tests/integration/**/*.ts",

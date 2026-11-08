@@ -29,7 +29,11 @@ export function resolveBffOrigin(
     throw new Error('BFF_ORIGIN 必须为 HTTPS 源站地址；本地开发可使用 localhost 的 HTTP 地址')
   return target.origin
 }
-const origin = resolveBffOrigin(env.BFF_ORIGIN || env.RENDER_EXTERNAL_URL, production, port)
+const origin = resolveBffOrigin(
+  env.BFF_ORIGIN || env.RENDER_EXTERNAL_URL || (env.NETLIFY === 'true' ? env.URL : undefined),
+  production,
+  port
+)
 const alertWorkerIntervalMs = Number(env.BFF_ALERT_WORKER_INTERVAL_MS || 60_000)
 if (
   !Number.isSafeInteger(alertWorkerIntervalMs) ||

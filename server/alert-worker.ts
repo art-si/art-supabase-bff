@@ -7,13 +7,13 @@ let consecutiveFailures = 0
 let nextRunAt = 0
 
 /** Database advisory locking and per-rule deduplication coordinate separate BFF processes. */
-export async function runAlertEvaluationBatch(): Promise<void> {
+export async function runAlertEvaluationBatch(timeoutMs = 45_000): Promise<void> {
   if (running || Date.now() < nextRunAt || !config.databaseUrl || !config.databaseKey) return
   running = true
   try {
     const result = await database
       .rpc('bff_alert_evaluate_batch', { p_limit: 100 })
-      .abortSignal(AbortSignal.timeout(45_000))
+      .abortSignal(AbortSignal.timeout(timeoutMs))
     if (result.error) throw new Error('告警评估数据库调用失败', { cause: result.error })
     const data: unknown = result.data
     if (!isObjectRecord(data) || typeof data.evaluated !== 'number')

@@ -1,0 +1,42 @@
+[build]
+  command = "pnpm build && pnpm verify:bundle"
+  publish = "docs"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "22.21.1"
+  PNPM_VERSION = "11.28.2"
+
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["vite"]
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/bff/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/auth/login"
+  to = "/.netlify/functions/bff/auth/login"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/"
+  to = "/.netlify/functions/bff/"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    X-Frame-Options = "DENY"

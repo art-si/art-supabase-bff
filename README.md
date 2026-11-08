@@ -10,6 +10,16 @@
 - pro 的业务角色不会自动变成 BFF 管理权限。BFF 使用自己的租户成员和应用授权。
 - 通过 art-supabase-pro npm 依赖复用主仓入口、Art 组件、Hooks、主题、布局、菜单 Store、工作标签页和动态路由注册器。BFF 仅保留业务页面、同源 API 和服务端会话接入，不保留公共实现副本。
 
+## Netlify 免费演示部署
+
+`netlify.toml` 发布 `docs/` 前端并将 `/api/*`、根入口和登录入口转发到同源 Node 函数。函数复用 `server/app.ts` 的原始认证、权限和 API 处理，普通 Node 开发/部署入口仍为 `server/index.ts`。
+
+在 Netlify 选择 Free，连接 GitHub 镜像仓库的 `master` 分支。配置与 `.env.example` 相同的服务端 OAuth、Supabase 和加密环境变量，以及正式 HTTPS 地址 `BFF_ORIGIN`。密钥只放平台环境变量；沿用现有加密密钥版本。身份中心的既有 OAuth 客户端需增加精确的 `https://<站点域名>/api/auth/callback`，保留本地回调。
+
+告警评估和资源清理均每分钟执行，使用 Netlify Scheduled Functions；普通请求不启动常驻计时器。仅正式发布版本执行定时任务，预览不会自动执行。
+
+Netlify 的同步函数存在 60 秒时限、缓冲请求/响应 6 MB 限制，二进制编码后实际可用文件大小更低。此限制独立于 BFF 原来的 10 MiB 文件限制；大文件和较慢的 AI 字图生成不能保证成功。该方案用于免费演示，不承诺与常驻 Node 的大文件、长任务能力相同。免费额度耗尽会暂停，需要在控制台监控使用量。
+
 ## Render 免费演示部署
 
 仓库根目录的 `render.yaml` 定义一个免费 Node Web Service，同时提供前端和同源 API；不新建 Render 数据库，继续使用既有 BFF Supabase 项目。
