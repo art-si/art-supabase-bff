@@ -1230,7 +1230,8 @@
   async function handleOpen(
     currentOptions: InterfaceOptions,
     current?: InterfaceRecord,
-    pending = false
+    pending = false,
+    initial?: { applicationId?: string; environment?: string }
   ): Promise<void> {
     if (saving.value) return
     options.value = currentOptions
@@ -1238,9 +1239,17 @@
     optionsLoadError.value = ''
     record.value = current
     const applicationId =
-      current?.applicationId ?? currentOptions.applications.find((item) => item.enabled)?.id ?? ''
+      current?.applicationId ??
+      currentOptions.applications.find((item) => item.enabled && item.id === initial?.applicationId)
+        ?.id ??
+      (initial?.applicationId
+        ? ''
+        : (currentOptions.applications.find((item) => item.enabled)?.id ?? ''))
     const environment =
-      current?.environment ?? currentOptions.environments[0]?.value ?? 'development'
+      current?.environment ??
+      currentOptions.environments.find((item) => item.value === initial?.environment)?.value ??
+      currentOptions.environments[0]?.value ??
+      'development'
     form.value = current
       ? {
           applicationId: current.applicationId,

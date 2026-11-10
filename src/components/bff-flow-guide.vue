@@ -19,8 +19,18 @@
           <p class="mb-2 text-xs leading-5 text-g-700">{{ item.description }}</p>
           <RouterLink
             v-if="index !== step && hasAuth(item.permission)"
-            :to="{ path: item.path, query: applicationId && index > 0 ? { applicationId } : {} }"
+            :to="{
+              path: item.path,
+              query:
+                index > 0
+                  ? {
+                      applicationId: applicationId || undefined,
+                      environment: environment || undefined
+                    }
+                  : {}
+            }"
             class="text-sm text-theme underline underline-offset-4"
+            @click="drawerRef?.handleClose()"
           >
             前往{{ item.title }}
           </RouterLink>
@@ -42,7 +52,7 @@
   function openGuide(): void {
     void drawerRef.value?.handleOpen(undefined, { title: '接口接入流程', size: 'lg' })
   }
-  const props = defineProps<{ step: 0 | 1 | 2 | 3; applicationId?: string }>()
+  const props = defineProps<{ step: 0 | 1 | 2 | 3; applicationId?: string; environment?: string }>()
   const { hasAuth } = useAuth()
   const steps = [
     {

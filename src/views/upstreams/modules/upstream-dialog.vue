@@ -421,7 +421,8 @@
   async function handleOpen(
     currentOptions: UpstreamOptions,
     row?: UpstreamService,
-    pending = false
+    pending = false,
+    initial?: { applicationId?: string; environment?: string }
   ): Promise<void> {
     if (saving.value) return
     options.value = currentOptions
@@ -432,11 +433,20 @@
     saveError.value = ''
     form.value = {
       applicationId:
-        row?.applicationId ?? currentOptions.applications.find((app) => app.enabled)?.id ?? '',
+        row?.applicationId ??
+        currentOptions.applications.find((app) => app.enabled && app.id === initial?.applicationId)
+          ?.id ??
+        (initial?.applicationId
+          ? ''
+          : (currentOptions.applications.find((app) => app.enabled)?.id ?? '')),
       code: row?.code ?? '',
       name: row?.name ?? '',
       description: row?.description ?? '',
-      environment: row?.environment ?? currentOptions.environments[0]?.value ?? 'development',
+      environment:
+        row?.environment ??
+        currentOptions.environments.find((item) => item.value === initial?.environment)?.value ??
+        currentOptions.environments[0]?.value ??
+        'development',
       baseUrl: row?.baseUrl ?? '',
       authType: row?.authType ?? 'none',
       headerName: row?.headerName ?? '',

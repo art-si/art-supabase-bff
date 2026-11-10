@@ -37,6 +37,8 @@ export interface InterfaceRunOptions {
     steps: readonly InterfaceStep[],
     remainingMs: number
   ) => Promise<InterfaceStepTarget[]>
+  /** Persist the first possible external side effect before creating an outbound request. */
+  beforeDispatch?: (step: InterfaceStep, remainingMs: number) => Promise<void>
 }
 
 function networkMessage(code: string): string {
@@ -277,7 +279,13 @@ export async function runInterface(
             exactCount: step.pagination?.exactCount
           },
           Math.min(target.timeoutMs, remaining()),
-          options.policy ?? upstreamPolicy
+          options.policy ?? upstreamPolicy,
+          undefined,
+          {
+            beforeDispatch: options.beforeDispatch
+              ? () => options.beforeDispatch!(step, remaining())
+              : undefined
+          }
         )
         let decoded: { ok: boolean; data: unknown } | null = null
         if (response.ok) {

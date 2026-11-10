@@ -49,6 +49,10 @@ export interface UpstreamExecutionResult {
   body: unknown | null
   contentRange?: string
 }
+export interface UpstreamExecutionHooks {
+  /** Runs after URL, DNS and CIDR validation, before a socket request can be created. */
+  beforeDispatch?: () => Promise<void>
+}
 
 interface ResolvedAddress {
   address: string
@@ -547,7 +551,8 @@ async function throughPolicy(
   timeoutMs: number,
   policy: UpstreamNetworkPolicy,
   resolver: UpstreamResolver,
-  prepare: (normalized: string) => TransportRequest
+  prepare: (normalized: string) => TransportRequest,
+  beforeDispatch?: () => Promise<void>
 ): Promise<TransportOutcome> {
   const started = performance.now()
   if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30_000)
@@ -583,6 +588,8 @@ async function throughPolicy(
     if (addresses.some((address) => !addressAllowed(address, policy, trusted)))
       return outcome('target_blocked', started)
     try {
+      if (prepared.mode === 'execute' && beforeDispatch) await beforeDispatch()
+      if (timedOut) return outcome('timeout', started)
       return await networkRequest(prepared, addresses[0], timeoutMs, started, (request) => {
         activeRequest = request
         if (timedOut) request.destroy()
@@ -634,7 +641,8 @@ export async function executeUpstreamRequest(
   request: UpstreamExecutionRequest,
   timeoutMs: number,
   policy: UpstreamNetworkPolicy,
-  resolver: UpstreamResolver = (hostname) => dnsLookup(hostname, { all: true, order: 'verbatim' })
+  resolver: UpstreamResolver = (hostname) => dnsLookup(hostname, { all: true, order: 'verbatim' }),
+  hooks: UpstreamExecutionHooks = {}
 ): Promise<UpstreamExecutionResult> {
   const { code, statusCode, durationMs, body, contentRange } = await throughPolicy(
     baseUrl,
@@ -645,7 +653,8 @@ export async function executeUpstreamRequest(
       ...executionTarget(normalized, request),
       method: request.method,
       mode: 'execute'
-    })
+    }),
+    hooks.beforeDispatch
   )
   return {
     ok: code === 'reachable',

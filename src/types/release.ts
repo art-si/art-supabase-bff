@@ -119,6 +119,10 @@ export interface PublishedExecution {
 export interface GatewayResponse {
   requestId: string
   version: number
+  operationId?: string
+  attemptNo?: number
+  dispatchState?: 'not_sent' | 'started' | 'legacy_unknown'
+  retryAllowed?: boolean
   code?: 200
   msg?: string
   data: Record<string, InterfaceScalar> | InterfacePageResult

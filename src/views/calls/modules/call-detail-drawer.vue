@@ -24,6 +24,44 @@
           :closable="false"
           show-icon
         />
+        <div class="grid gap-2">
+          <div class="flex flex-wrap items-center gap-3">
+            <RouterLink
+              v-if="hasAuth('BffRelease:View')"
+              :to="{
+                name: 'BffReleases',
+                query: {
+                  applicationId: detail.applicationId,
+                  environment: detail.environment,
+                  recordId: detail.interfaceId
+                }
+              }"
+              class="text-theme"
+              @click="drawerRef?.handleClose()"
+              >查看运行版本</RouterLink
+            >
+            <RouterLink
+              v-if="hasAuth('BffInterface:View')"
+              :to="{
+                name: 'BffInterfaces',
+                query: {
+                  applicationId: detail.applicationId,
+                  environment: detail.environment,
+                  recordId: detail.interfaceId
+                }
+              }"
+              class="text-theme"
+              @click="drawerRef?.handleClose()"
+              >查看接口草稿</RouterLink
+            >
+          </div>
+          <p
+            v-if="hasAuth('BffRelease:View') || hasAuth('BffInterface:View')"
+            class="text-xs text-g-700"
+          >
+            当前配置可能与本次调用使用的历史版本不同，请按版本号核对。
+          </p>
+        </div>
         <ArtSectionCard
           title="调用概况"
           subtitle="仅展示用于排障的安全元数据"
@@ -84,6 +122,7 @@
 
 <script setup lang="ts">
   import { ElButton, ElTag } from 'element-plus'
+  import { useAuth } from '@/hooks/core/useAuth'
   import { formatWithDayjs } from '@/utils/time'
   import type { ArtDescriptionItem } from '@/components/core/base/art-descriptions/types'
   import type { ArtDrawerExpose } from '@/components/core/drawers/art-drawer/types'
@@ -95,6 +134,7 @@
   import type { CallRecord, CallStatus } from '@bff/types/observability'
 
   const drawerRef = ref<ArtDrawerExpose<string>>()
+  const { hasAuth } = useAuth()
   const requestId = ref('')
   const detail = shallowRef<CallRecord>()
   const loading = ref(false)

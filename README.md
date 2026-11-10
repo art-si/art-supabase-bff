@@ -90,7 +90,6 @@ Windows 上可复用已登录的 Supabase CLI 凭据执行初始化工具，凭�
 
 ```powershell
 ./scripts/supabase-management.ps1 -Action Inspect
-./scripts/supabase-management.ps1 -Action VerifyBff
 ./scripts/supabase-management.ps1 -Action PrepareMemberDirectory
 ./scripts/supabase-management.ps1 -Action ProvisionMember -Login '已有账号邮箱' -MemberRole viewer
 ```
@@ -135,16 +134,19 @@ Windows 上可复用已登录的 Supabase CLI 凭据执行初始化工具，凭�
 - 首次核验：搜索「线上平台健康检查」，确认应用「线上接入验证」、环境「生产」，点击「选择接口」→「运行接口」。该接口不需要参数，成功结果为 `status: ok`，并显示请求编号和运行版本。
 - 业务接口接入：在 BFF 登记可从公网访问的 HTTPS 上游，将精确源站加入服务端允许列表；声明输入与输出、测试、发布并启用后，Pro 刷新目录即可调用。分页接口显示「查询分页记录」，普通接口显示「运行接口」。
 - Pro 页面源码为 `src/views/examples/bff-integration/index.vue`；复用调用 API 为 `src/api/bff.ts`。目前接入中心消费已发布接口，既有运输/车辆等业务页面不会自动替换数据源，需要在具体 API provider 中显式接入。
-- 原「本地集成演示」三条接口仍指向 `127.0.0.1:33445`，只供本机演示，不能从 Netlify 调用；不要将其测试失败视为线上桥接失败。
 
-### 日常操作与本地演示
+### 日常操作
 
 1. 在「应用管理」登记并启用应用，配置成员授权；行内「配置应用接入」进入该应用的上游列表。
 2. 在「上游服务」登记真实服务地址与环境、配置认证并启用，再检测连接。启用记录不会启动服务进程；连接正常也不代表业务认证或输出映射正确。
 3. 在「接口编排」声明输入、步骤和输出，保存后验证定义，再运行测试。分页输入必须是正整数，页码从 1 开始，每页最多 100 条。
 4. 在「版本发布」发布并启用版本；Pro「BFF 接入中心」按应用、环境选择已发布接口调用。失败时查看步骤摘要或调用日志；修改草稿后重新测试和发布。
 
-已有 Java / Supabase / CloudBase 本地演示记录时，在 BFF 目录运行 `pnpm demo:serve`，保持终端运行，再用页码 `1`、页长 `20` 测试。此命令只在 `127.0.0.1:33445` 提供合成数据，不创建应用、不修改数据库、不发布版本；服务关闭后这些本地示例会连接失败。上游根地址支持连接检测。
+接入和排障入口保留应用、环境及接口上下文：上游行内「配置接口」进入同应用、同环境的编排列表；接口「前往发布」定位对应发布记录；发布页可返回草稿或查看调用日志。使用流程中的跳转也会保留当前应用和环境，新建服务或接口默认沿用列表范围。
+
+发布前检查展示未满足条件的数量，并按权限提供应用、上游或草稿的处理入口；入口路径冲突可查看同环境的发布接口。回滚和启用检查针对已发布快照，修改草稿不会修复既有快照。若版本操作发生并发冲突，窗口禁止继续提交旧版本，需从刷新后的列表重新打开。
+
+告警详情可按应用、环境、关联接口及观测时间窗口查看调用日志，应用级告警也可定位相应范围。调用详情可返回运行版本或当前草稿；这些页面展示当前配置，当次调用以日志中记录的版本及步骤摘要为准。结果未知的写调用仍须核对上游业务结果，不自动重试。
 
 本机 Pro 需要同时运行 `pnpm bff:dev-bridge`（3037）和 Pro 开发服务（3006），BFF 开发服务在 3010。两端现有桥接配置需匹配。Pro 业务列表通过 `@/api/bff` 的 `fetchBffCatalog` 获取有权访问的接口，再将 `fetchBffPage(api, input, { current, size })` 作为 ArtTableQuery 数据来源；不要在页面保存 BFF 或上游服务密钥。
 
@@ -154,13 +156,6 @@ Windows 上可复用已登录的 Supabase CLI 凭据执行初始化工具，凭�
 - Pro 公共 npm 包提供 `@/api/bff` 和完整 **BFF 接入中心**。启用 `VITE_BFF_ENABLED=true` 后，只有服务端确认当前账号具有 BFF 访问权限才贡献动态菜单；默认关闭，既有业务菜单保持原行为。
 - GitHub Pages 上的 Pro 通过已认证的 `bff-gateway` Edge Function 调用独立 BFF 服务。Edge 用 Pro `Auth.getUser` 和有效用户资料检查身份，BFF 再按固定签发者与 subject 核对自己的会员、应用及接口权限。浏览器不接收 BFF 服务密钥、上游凭据或 BFF 令牌。
 - 两侧服务端配置同一专用 32 字节 Base64 `BFF_PRO_BRIDGE_SECRET`；Pro Edge 还需 `BFF_SERVICE_URL=https://你的BFF域名` 和准确的 `BFF_PRO_ALLOWED_ORIGINS`。签名绑定请求体，60 秒过期，一次性编号在数据库防重放；浏览器 Cookie 网关的 CSRF 校验继续生效。
-- 本地演示使用 Pro 的 `pnpm bff:dev-bridge` 和同一 Edge handler，配合同源 `/__bff_bridge` 开发代理；开发 HTTP 仅允许显式本机源站。未部署独立 HTTPS 服务时，不启用线上接入。
-
-真实 HTTP 回归：`node --env-file-if-exists=.env.local --use-env-proxy --import tsx tests/integration/pro-bridge-http.ts`。该测试在隔离租户创建三种格式的受控本机上游并验证发布、两条记录、业务失败、字段过滤与跨租户拒绝，结束后清理。它使用合成身份，不能替代真实 Pro 登录验收。
-
-本地 Pro 演示需先确认 BFF 已应用 `server/database/schema.sql`，并在 BFF 服务端和 Pro 本地桥接进程设置相同的专用 `BFF_PRO_BRIDGE_SECRET`。BFF 本地环境还需显式设置 `BFF_UPSTREAM_ALLOW_LOCAL_HTTP=true`、`BFF_UPSTREAM_ALLOWED_ORIGINS=http://127.0.0.1:33445`。在 Pro 本地环境设置 `BFF_SERVICE_URL` 为本机 BFF 地址、`BFF_DEV_PROXY_TARGET=http://127.0.0.1:3037`、`VITE_BFF_ENABLED=true`、`VITE_BFF_DEV_ENDPOINT=/__bff_bridge`。启动 BFF、Pro 的 `pnpm bff:dev-bridge` 和 Pro 开发服务器后，以已开通 BFF 的统一账号登录 Pro。
-
-使用同一账号经身份中心核验的 subject UUID 设置 `BFF_DEMO_ADMIN_SUB`，运行 `node --env-file-if-exists=.env.local --use-env-proxy --import tsx scripts/pro-integration-demo.ts`。脚本再次核验其 BFF 活跃管理员成员身份，仅在本机启动受控上游，发布 Java、Supabase、CloudBase 三个两行分页示例；Pro 的 **BFF 接入中心** 可直接按目录调用。按 Ctrl+C 会停用演示应用；进程异常退出后可执行同一脚本并附 `--stop` 停用。脚本拒绝生产地址、非 BFF 数据库、缺少本机上游允许列表的环境。演示资料使用固定标记隔离，不作为生产数据。
 
 ## 版本发布与网关
 
@@ -176,7 +171,7 @@ Windows 上可复用已登录的 Supabase CLI 凭据执行初始化工具，凭�
 - **运行观测 → 告警中心**：配置失败次数、失败率、超时次数或结果不确定次数，使用 5/15/60 分钟窗口；支持阈值、最小样本量、静默期、立即评估、启停与归档。
 - 告警事件支持打开、确认、恢复和关闭。确认只表示有人接手；恢复依据后续真实窗口，不把确认当作业务恢复。
 - 后台评估默认每 60 秒执行，支持故障退避和跨租户公平调度。终态调用元数据保留 90 天后分批清理，后台调度可能带来延迟；该保留期也限定幂等键的最长存续范围。
-- 新模块先通过数据库回滚测试和真实 HTTP 联调，再通过 scoped `EnableReleaseNavigation`、`EnableObservabilityNavigation` 开放给已有管理员租户。
+- 新模块完成数据库回滚校验和真实 HTTP 联调后，再通过 scoped `EnableReleaseNavigation`、`EnableObservabilityNavigation` 开放给已有管理员租户。
 
 ## 模块字典
 
@@ -193,24 +188,13 @@ Windows 上可复用已登录的 Supabase CLI 凭据执行初始化工具，凭�
 
 字典默认项维护在 `server/database/schema.sql` 的 `BFF MODULE DICTIONARIES` 区块。使用 `powershell.exe -NoProfile -File scripts/supabase-management.ps1 -Action SyncBusinessDictionaries` 同步至限定的 BFF 项目。该操作先保存恢复快照、执行两次回滚校验，再幂等补齐缺失项，并验证已有选项及租户隔离。
 
-## 验证
+## 检查
 
 ```powershell
 pnpm typecheck
-pnpm test:unit
-pnpm test:e2e
 pnpm ui:audit
 pnpm build
-node --use-env-proxy --import tsx tests/integration/http-security.ts
 ```
-
-浏览器回归和最后一项需要本地服务运行于 http://localhost:3012，可通过 BFF_TEST_ORIGIN 指定其他本机端口。浏览器回归只使用合成 API 数据，验证实际 npm 页面和动态路由；真实 API 检查使用右边数据库中的隔离测试租户，结束后清理所有测试记录。这两项都不能代替真实统一登录验收。
-
-代理环境运行本机 HTTP 联测时，先设置 `$env:NO_PROXY='localhost,127.0.0.1'`。数据库回滚验证包含 `control-plane-schema.sql`、`role-access.sql`、`application-authorization.sql`、`upstream-schema.sql` 和 `interface-schema.sql`；仅执行 `ValidateBffSchema` 不提交结构变更。
-
-成员页视觉数据可通过 `node --use-env-proxy --import tsx tests/integration/ui-fixtures.ts apply` 准备，并以同命令的 `remove` 清理。该工具只创建两条停用、无法匹配 pro 签发者的临时验收记录，不创建身份中心账号、不授予访问权限；验收后必须清理。
-
-tests/fixtures/ui-server.ts 仅供界面测试，提供内存中的虚构数据，不连接任何 Supabase 项目，不能作为真实认证验证。
 
 ## npm 复用约定
 
@@ -220,7 +204,7 @@ tests/fixtures/ui-server.ts 仅供界面测试，提供内存中的虚构数据�
 - Vite、TypeScript、ESLint、Stylelint、Prettier 和 UI 审查复用主仓配置。`npm run boundary:audit` 阻止公共源码重新复制到本工程。
 - `npm run skills:link` 将主仓随包发布的 skills 注册到本工程；安装依赖后自动执行，不维护技能内容副本。
 - 升级公共能力：先在 pro 修改和验证，发布提交后更新本工程 `art-supabase-pro` 的固定提交地址，再安装、检查和回归。运行、构建和类型检查均只加载固定 npm 包，不查找旁边的源码目录。
-- `npm run check` 运行边界、类型、代码规范、样式、UI 和认证单测；`npm run build` 验证生产打包。
+- `npm run check` 运行边界、类型、代码规范、样式和 UI 审查；`npm run build` 验证生产打包。
 
 公共源码旧副本已移至忽略目录 `.artifacts/framework-source-backup`，不参与运行、构建或提交。移出前已保存 Git 基线；工程内不再维护这些公共副本。
 

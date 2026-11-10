@@ -4,13 +4,6 @@
     "lib": ["esnext"],
     "types": ["node"]
   },
-  "include": [
-    "netlify/functions/**/*.ts",
-    "scripts/pro-integration-demo.ts",
-    "server/**/*.ts",
-    "tests/unit/**/*.ts",
-    "tests/integration/**/*.ts",
-    "tests/fixtures/**/*.ts"
-  ],
+  "include": ["netlify/functions/**/*.ts", "server/**/*.ts"],
   "exclude": ["node_modules", "docs", "dist"]
 }

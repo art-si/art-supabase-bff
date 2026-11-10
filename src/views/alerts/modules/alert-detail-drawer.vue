@@ -63,15 +63,26 @@
             >确认接手</ElButton
           >
           <RouterLink
-            v-if="detail.interfaceId && hasAuth('BffCall:View')"
-            :to="{ name: 'BffCalls', query: { interfaceId: detail.interfaceId } }"
+            v-if="hasAuth('BffCall:View')"
+            :to="{
+              name: 'BffCalls',
+              query: {
+                applicationId: detail.applicationId,
+                environment: detail.environment,
+                interfaceId: detail.interfaceId || undefined,
+                from: detail.windowStartedAt,
+                to: detail.windowEndedAt
+              }
+            }"
             class="text-theme"
-            >查看关联接口调用</RouterLink
+            @click="drawerRef?.handleClose()"
+            >查看关联调用</RouterLink
           >
           <RouterLink
             v-if="hasAuth('BffAlertRule:View')"
             :to="{ name: 'BffAlertRules' }"
             class="text-theme"
+            @click="drawerRef?.handleClose()"
             >查看告警规则列表</RouterLink
           >
         </div>

@@ -1891,13 +1891,13 @@ begin
         when entry.mark='BffRelease' then array['View','Publish','Rollback','ChangeStatus']
         when entry.mark='System:WebsiteConfig' then array['View','Publish','GenerateWordmark']
         when entry.mark='BffResource' then array['View','Add','Edit','Delete']
-        when entry.name='BffCalls' then array['View']
+        when entry.name='BffCalls' then array['View','Reconcile']
         when entry.name='BffAlertRules' then array['View','Add','Edit','ChangeStatus','Archive','Evaluate']
         when entry.name='BffAlertInstances' then array['View','Acknowledge']
         when entry.mark='System:Role' then array['View','Add','Edit','Delete','AssignPermission','AssignUser']
         when entry.mark='System:Member' then array['View','Add','Edit'] else array['View','Add','Edit','Delete'] end loop
         insert into public.bff_menus(tenant_id,parent_id,name,type,meta,builtin,create_by,update_by)
-          values(actor.tenant_id,page,case when entry.name='BffAlertRules' and action='View' then 'BffAlertRule:View' else entry.mark||':'||action end,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then case when entry.mark='System:Member' then '开通成员' else '新增' end when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Archive' then '归档' when 'Acknowledge' then '确认告警' when 'Evaluate' then '立即评估' when 'GenerateWordmark' then 'AI 艺术字生成' when 'Publish' then case when entry.mark='System:WebsiteConfig' then '发布配置' else '发布版本' end when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
+          values(actor.tenant_id,page,case when entry.name='BffAlertRules' and action='View' then 'BffAlertRule:View' else entry.mark||':'||action end,'button',jsonb_build_object('title',case action when 'View' then '查看' when 'Add' then case when entry.mark='System:Member' then '开通成员' else '新增' end when 'Edit' then '编辑' when 'Grant' then '访问授权' when 'AssignPermission' then '分配权限' when 'AssignUser' then '分配成员' when 'ChangeStatus' then '切换状态' when 'Archive' then '归档' when 'Acknowledge' then '确认告警' when 'Reconcile' then '核对结案' when 'Evaluate' then '立即评估' when 'GenerateWordmark' then 'AI 艺术字生成' when 'Publish' then case when entry.mark='System:WebsiteConfig' then '发布配置' else '发布版本' end when 'Rollback' then '回滚版本' when 'Test' then case when entry.mark='BffInterface' then '试运行' else '连通性检测' end when 'TestWrite' then '试运行写入' when 'Validate' then '结构校验' when 'RotateSecret' then '更换凭据' else '删除' end,
             'isEnable',entry.mark not in ('BffInterface','BffRelease','System:WebsiteConfig','BffCall','BffAlert','BffResource')),true,actor.id,actor.id)
           on conflict (tenant_id,name) do nothing;
       end loop;
@@ -4451,7 +4451,9 @@ begin
     end loop;
     for entry in select * from (values
       ('commonBoolean','是否','BffCommon'),
-      ('bffRuntimeEnvironment','运行环境','BffCommon'),
+        ('bffRuntimeEnvironment','运行环境','BffCommon'),
+        ('bffDispatchState','请求外发状态','BffCommon'),
+        ('bffReconciliationConclusion','核对结论','BffCommon'),
       ('sysWebsiteLanguage','网站语言','BffSystemConfiguration'),
       ('sysCaptchaProvider','登录验证方式','BffSystemConfiguration'),
       ('sysTurnstileSize','验证控件尺寸','BffSystemConfiguration'),
@@ -4484,6 +4486,12 @@ begin
       ('bffRuntimeEnvironment','development','开发环境',1,'info'),
       ('bffRuntimeEnvironment','staging','预发布环境',2,'warning'),
       ('bffRuntimeEnvironment','production','生产环境',3,'success'),
+      ('bffDispatchState','not_sent','未外发',1,'info'),
+      ('bffDispatchState','started','已开始外发',2,'warning'),
+      ('bffDispatchState','legacy_unknown','旧调用无法确认',3,'danger'),
+      ('bffReconciliationConclusion','confirmed_executed','确认已执行',1,'success'),
+      ('bffReconciliationConclusion','confirmed_not_executed','确认未执行',2,'info'),
+      ('bffReconciliationConclusion','manually_resolved','人工处置',3,'warning'),
       ('sysWebsiteLanguage','zh','简体中文',1,'info'),('sysWebsiteLanguage','en','English',2,'info'),
       ('sysCaptchaProvider','turnstile','Cloudflare Turnstile',1,'info'),
       ('sysTurnstileSize','normal','标准',1,'info'),('sysTurnstileSize','compact','紧凑',2,'info'),

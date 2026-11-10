@@ -73,21 +73,42 @@
   const optionsLoading = ref(false)
   const optionsError = ref('')
   const showSearchBar = ref(true)
+  const routeFilters = () => {
+    const environment = route.query.environment
+    return {
+      requestId: typeof route.query.requestId === 'string' ? route.query.requestId : '',
+      applicationId: typeof route.query.applicationId === 'string' ? route.query.applicationId : '',
+      environment:
+        environment === 'development' || environment === 'staging' || environment === 'production'
+          ? environment
+          : '',
+      interfaceId: typeof route.query.interfaceId === 'string' ? route.query.interfaceId : '',
+      period:
+        typeof route.query.from === 'string' && typeof route.query.to === 'string'
+          ? [route.query.from, route.query.to]
+          : []
+    }
+  }
   const filters = ref({
-    requestId: '',
-    applicationId: '',
-    environment: '',
-    interfaceId: typeof route.query.interfaceId === 'string' ? route.query.interfaceId : '',
+    ...routeFilters(),
     status: '',
-    errorClass: '',
-    period: [] as string[]
+    errorClass: ''
   })
   watch(
-    () => route.query.interfaceId,
-    (value) => {
-      filters.value.interfaceId = typeof value === 'string' ? value : ''
-      void tableRef.value?.refreshCreate()
-    }
+    () => [
+      route.query.applicationId,
+      route.query.environment,
+      route.query.interfaceId,
+      route.query.requestId,
+      route.query.from,
+      route.query.to
+    ],
+    () => {
+      Object.assign(filters.value, routeFilters(), { status: '', errorClass: '' })
+      tableRef.value?.cancelRequest()
+      void nextTick(() => tableRef.value?.getData())
+    },
+    { flush: 'post' }
   )
   const summary = shallowRef<CallList['summary']>({
     total: 0,
@@ -234,8 +255,12 @@
       size: Math.max(1, Number(params.size) || 20),
       requestId: typeof params.requestId === 'string' ? params.requestId : undefined,
       applicationId: typeof params.applicationId === 'string' ? params.applicationId : undefined,
-      environment: options.value?.environments.find((item) => item.value === params.environment)
-        ?.value,
+      environment:
+        params.environment === 'development' ||
+        params.environment === 'staging' ||
+        params.environment === 'production'
+          ? params.environment
+          : undefined,
       interfaceId: typeof params.interfaceId === 'string' ? params.interfaceId : undefined,
       status: options.value?.statuses.find((item) => item.value === params.status)?.value,
       errorClass: options.value?.errorClasses.find((item) => item.value === params.errorClass)

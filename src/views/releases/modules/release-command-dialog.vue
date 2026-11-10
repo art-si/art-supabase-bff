@@ -39,21 +39,32 @@
       <ArtSectionCard
         v-if="action !== 'disable'"
         :title="`${actionLabel}前检查`"
-        subtitle="每次提交前都会重新检查当前草稿、上游状态和调用边界。"
+        :subtitle="
+          action === 'publish'
+            ? '提交前重新检查当前草稿、上游状态和调用边界。'
+            : '检查所选发布快照及其依赖；修改草稿不会改变已发布快照。'
+        "
         preserve-content-structure
       >
         <div class="grid gap-2 p-3">
-          <div
-            v-for="check in readiness?.checks ?? []"
-            :key="check.key"
-            class="flex min-w-0 items-start gap-3 py-1"
-          >
+          <p v-if="readiness" class="text-sm font-medium text-g-900" role="status">
+            {{ readiness.ready ? '检查通过，可以继续操作' : `还有 ${failedChecks} 项条件需要处理` }}
+          </p>
+          <div v-for="check in checks" :key="check.key" class="flex min-w-0 items-start gap-3 py-1">
             <ElTag :type="check.passed ? 'success' : 'danger'" effect="light" round>
               {{ check.passed ? '通过' : '阻止' }}
             </ElTag>
             <div class="min-w-0">
               <strong class="block text-sm text-g-900">{{ check.label }}</strong>
               <p class="mt-1 text-xs text-g-700">{{ check.message }}</p>
+              <RouterLink
+                v-if="check.destination"
+                :to="check.destination.to"
+                class="mt-1 inline-flex min-h-6 items-center text-sm text-theme underline underline-offset-4"
+                @click="closeForNavigation"
+              >
+                {{ check.destination.label }}
+              </RouterLink>
             </div>
           </div>
           <ElAlert
@@ -64,7 +75,7 @@
             show-icon
           />
           <ElButton
-            v-if="readinessError || !readiness?.ready"
+            v-if="!conflicted && (readinessError || !readiness?.ready)"
             link
             type="primary"
             :loading="checking"
@@ -89,12 +100,14 @@
         label-position="top"
       />
       <ElAlert v-if="submitError" :title="submitError" type="error" :closable="false" show-icon />
+      <ElButton v-if="conflicted" @click="closeForNavigation">关闭并查看最新记录</ElButton>
     </div>
   </ArtDialog>
 </template>
 
 <script setup lang="ts">
   import { ElMessage, type FormRules } from 'element-plus'
+  import { useAuth } from '@/hooks/core/useAuth'
   import { useArtFeedback } from '@/hooks/core/useArtFeedback'
   import { validateArtFormForSubmit } from '@/utils/form/validate-art-form'
   import type ArtForm from '@/components/core/forms/art-form/index.vue'
@@ -118,6 +131,7 @@
   type Action = 'publish' | 'rollback' | 'enable' | 'disable'
   const emit = defineEmits<{ success: [history: ReleaseHistory]; stale: [] }>()
   const { confirmAction } = useArtFeedback()
+  const { hasAuth } = useAuth()
   const dialogRef = ref<ArtDialogExpose<ReleaseRecord>>()
   const notesFormRef = ref<InstanceType<typeof ArtForm>>()
   const record = shallowRef<ReleaseRecord>()
@@ -126,6 +140,7 @@
   const readiness = shallowRef<ReleaseReadiness>()
   const checking = ref(false)
   const saving = ref(false)
+  const conflicted = ref(false)
   const readinessError = ref('')
   const submitError = ref('')
   const form = ref({ notes: '' })
@@ -166,6 +181,7 @@
     Boolean(
       record.value &&
       form.value.notes.trim() &&
+      !conflicted.value &&
       !saving.value &&
       !checking.value &&
       (action.value === 'disable' || readiness.value?.ready)
@@ -174,10 +190,46 @@
   watch(canSubmit, (value) => dialogRef.value?.setOptions({ confirmDisabled: !value }))
   const environmentText = (environment: ReleaseRecord['environment']): string =>
     ({ development: '开发', staging: '预发布', production: '生产' })[environment]
+  const failedChecks = computed(
+    () => readiness.value?.checks.filter((check) => !check.passed).length ?? 0
+  )
+  const checks = computed(() =>
+    (readiness.value?.checks ?? []).map((check) => {
+      const current = record.value
+      let destination:
+        { label: string; to: { path: string; query?: Record<string, string> } } | undefined
+      if (!check.passed && current) {
+        const query = { applicationId: current.applicationId, environment: current.environment }
+        if (check.key === 'application' && hasAuth('BffApplication:View')) {
+          destination = { label: '前往应用管理', to: { path: '/applications' } }
+        } else if (check.key.startsWith('upstream:') && hasAuth('BffUpstream:View')) {
+          destination = { label: '检查上游服务', to: { path: '/upstreams', query } }
+        } else if (check.key === 'route' && hasAuth('BffRelease:View')) {
+          destination = { label: '查看同环境发布接口', to: { path: '/releases', query } }
+        } else if (
+          action.value === 'publish' &&
+          ['definition', 'validation', 'test', 'test-targets'].includes(check.key) &&
+          hasAuth('BffInterface:View')
+        ) {
+          destination = {
+            label: '处理接口草稿',
+            to: {
+              path: '/interfaces',
+              query: { ...query, recordId: current.interfaceId }
+            }
+          }
+        }
+      }
+      return { ...check, destination }
+    })
+  )
+  function closeForNavigation(): void {
+    void dialogRef.value?.handleClose()
+  }
 
   async function loadReadiness(): Promise<void> {
     const current = record.value
-    if (!current || action.value === 'disable' || checking.value) return
+    if (!current || conflicted.value || action.value === 'disable' || checking.value) return
     checking.value = true
     readinessError.value = ''
     try {
@@ -255,7 +307,11 @@
     } catch (error) {
       submitError.value =
         error instanceof BffApiError ? error.message : '版本操作失败，请刷新后重试'
-      if (error instanceof BffApiError && error.status === 409) emit('stale')
+      if (error instanceof BffApiError && error.status === 409) {
+        conflicted.value = true
+        submitError.value += '。请关闭窗口，从最新列表重新打开后再操作。'
+        emit('stale')
+      }
       return false
     } finally {
       saving.value = false
@@ -269,6 +325,7 @@
     form.value = { notes: '' }
     readinessError.value = ''
     submitError.value = ''
+    conflicted.value = false
   }
   async function handleOpen(
     current: ReleaseRecord,
@@ -283,6 +340,7 @@
     form.value = { notes: '' }
     readinessError.value = ''
     submitError.value = ''
+    conflicted.value = false
     await dialogRef.value?.handleOpen(current, {
       title: `${actionLabel.value}接口`,
       size: 'md',

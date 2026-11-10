@@ -427,14 +427,21 @@ function rpcFailure(error: { code?: string; message?: string } | null): void {
 }
 
 function asGatewayKind(value: unknown): {
-  kind: 'started' | 'running' | 'replay' | 'unknown'
+  kind: 'started' | 'running' | 'replay' | 'unknown' | 'failed' | 'completed'
   requestId: string
   versionNumber: number
+  operationId?: string
+  attemptNo?: number
+  dispatchState?: 'not_sent' | 'started' | 'legacy_unknown'
+  retryAllowed?: boolean
   resultPayload?: string
+  operation?: Record<string, unknown>
 } {
   if (
     !isObjectRecord(value) ||
-    !['started', 'running', 'replay', 'unknown'].includes(String(value.kind)) ||
+    !['started', 'running', 'replay', 'unknown', 'failed', 'completed'].includes(
+      String(value.kind)
+    ) ||
     typeof value.requestId !== 'string' ||
     !uuidPattern.test(value.requestId) ||
     !Number.isSafeInteger(value.versionNumber) ||
@@ -445,13 +452,31 @@ function asGatewayKind(value: unknown): {
   )
     throw new HttpError(503, '网关调用状态暂不可用，请稍后重试', 'GATEWAY_UNAVAILABLE')
   const kind = value.kind
-  if (kind !== 'started' && kind !== 'running' && kind !== 'replay' && kind !== 'unknown')
+  if (
+    kind !== 'started' &&
+    kind !== 'running' &&
+    kind !== 'replay' &&
+    kind !== 'unknown' &&
+    kind !== 'failed' &&
+    kind !== 'completed'
+  )
     throw new HttpError(503, '网关调用状态暂不可用，请稍后重试', 'GATEWAY_UNAVAILABLE')
   return {
     kind,
     requestId: value.requestId,
     versionNumber: Number(value.versionNumber),
-    ...(typeof value.resultPayload === 'string' ? { resultPayload: value.resultPayload } : {})
+    ...(typeof value.operationId === 'string' && uuidPattern.test(value.operationId)
+      ? { operationId: value.operationId }
+      : {}),
+    ...(Number.isSafeInteger(value.attemptNo) && Number(value.attemptNo) > 0
+      ? { attemptNo: Number(value.attemptNo) }
+      : {}),
+    ...(['not_sent', 'started', 'legacy_unknown'].includes(String(value.dispatchState))
+      ? { dispatchState: value.dispatchState as 'not_sent' | 'started' | 'legacy_unknown' }
+      : {}),
+    ...(typeof value.retryAllowed === 'boolean' ? { retryAllowed: value.retryAllowed } : {}),
+    ...(typeof value.resultPayload === 'string' ? { resultPayload: value.resultPayload } : {}),
+    ...(isObjectRecord(value.operation) ? { operation: value.operation } : {})
   }
 }
 
@@ -488,6 +513,20 @@ export function gatewayStepCode(code: string | null): string | null {
 export type ProBridgeInvocation =
   | { operation: 'catalog' }
   | {
+      operation: 'operation-list'
+      filters: Record<string, string | number>
+    }
+  | {
+      operation: 'operation-status'
+      lookup: { operationId?: string; requestId?: string; idempotencyKey?: string }
+    }
+  | {
+      operation: 'operation-retry'
+      operationId: string
+      expectedRequestId: string
+      input: Record<string, InterfaceScalar>
+    }
+  | {
       operation: 'invoke'
       applicationCode: string
       environment: 'development' | 'staging' | 'production'
@@ -498,7 +537,29 @@ export type ProBridgeInvocation =
       idempotencyKey?: string
     }
 
-function bridgeRequest(value: ProBridgeInvocation): {
+type ProBridgeInvoke = Extract<ProBridgeInvocation, { operation: 'invoke' }>
+
+function scalarRecord(value: unknown, label: string): Record<string, InterfaceScalar> {
+  if (!isObjectRecord(value) || Object.keys(value).length > 32)
+    throw new HttpError(400, `${label}格式有误`, 'INVALID_INPUT')
+  const result: Record<string, InterfaceScalar> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (
+      !/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) ||
+      (item !== null &&
+        typeof item !== 'string' &&
+        typeof item !== 'number' &&
+        typeof item !== 'boolean') ||
+      (typeof item === 'number' && (!Number.isFinite(item) || Math.abs(item) > 1e12)) ||
+      (typeof item === 'string' && item.length > 1024)
+    )
+      throw new HttpError(400, `${label}格式有误`, 'INVALID_INPUT')
+    result[key] = item
+  }
+  return result
+}
+
+function bridgeRequest(value: ProBridgeInvoke): {
   route: ReturnType<typeof parseGatewayRoute>
   supplied: Record<string, unknown>
   idempotencyKey: string | undefined
@@ -520,31 +581,10 @@ function bridgeRequest(value: ProBridgeInvocation): {
     throw new HttpError(400, '桥接调用内容格式有误', 'INVALID_INPUT')
   pathSegments(value.path)
   const query = new URLSearchParams()
-  for (const [key, item] of Object.entries(value.query)) {
-    if (
-      !/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) ||
-      (item !== null &&
-        typeof item !== 'string' &&
-        typeof item !== 'number' &&
-        typeof item !== 'boolean') ||
-      (typeof item === 'number' && (!Number.isFinite(item) || Math.abs(item) > 1e12)) ||
-      (typeof item === 'string' && item.length > 1024)
-    )
-      throw new HttpError(400, '桥接查询参数格式有误', 'INVALID_INPUT')
+  for (const [key, item] of Object.entries(scalarRecord(value.query, '桥接查询参数'))) {
     query.append(key, item === null ? '' : String(item))
   }
-  for (const [key, item] of Object.entries(value.body)) {
-    if (
-      !/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) ||
-      (item !== null &&
-        typeof item !== 'string' &&
-        typeof item !== 'number' &&
-        typeof item !== 'boolean') ||
-      (typeof item === 'number' && (!Number.isFinite(item) || Math.abs(item) > 1e12)) ||
-      (typeof item === 'string' && item.length > 1024)
-    )
-      throw new HttpError(400, '桥接请求体格式有误', 'INVALID_INPUT')
-  }
+  scalarRecord(value.body, '桥接请求体')
   return {
     route: {
       appCode: value.applicationCode,
@@ -566,6 +606,58 @@ export function parseProBridgeInvocation(value: unknown): ProBridgeInvocation {
       throw new HttpError(400, '接口目录请求不能包含其他参数', 'INVALID_INPUT')
     return { operation: 'catalog' }
   }
+  if (value.operation === 'operation-list') {
+    if (
+      !isObjectRecord(value.filters) ||
+      Object.keys(value).some((key) => !['operation', 'filters'].includes(key))
+    )
+      throw new HttpError(400, '调用记录筛选格式有误', 'INVALID_INPUT')
+    const allowed = ['current', 'size', 'applicationId', 'environment', 'status', 'reconciliation']
+    if (Object.keys(value.filters).some((key) => !allowed.includes(key)))
+      throw new HttpError(400, '调用记录筛选格式有误', 'INVALID_INPUT')
+    return {
+      operation: 'operation-list',
+      filters: value.filters as Record<string, string | number>
+    }
+  }
+  if (value.operation === 'operation-status') {
+    if (
+      !isObjectRecord(value.lookup) ||
+      Object.keys(value).some((key) => !['operation', 'lookup'].includes(key))
+    )
+      throw new HttpError(400, '调用状态查询格式有误', 'INVALID_INPUT')
+    const lookup = value.lookup
+    const present = ['operationId', 'requestId', 'idempotencyKey'].filter(
+      (key) => typeof lookup[key] === 'string'
+    )
+    if (
+      present.length !== 1 ||
+      Object.keys(lookup).some(
+        (key) => !['operationId', 'requestId', 'idempotencyKey'].includes(key)
+      ) ||
+      !uuidPattern.test(String(lookup[present[0]]))
+    )
+      throw new HttpError(400, '调用状态查询格式有误', 'INVALID_INPUT')
+    return { operation: 'operation-status', lookup: lookup as Record<string, string> }
+  }
+  if (value.operation === 'operation-retry') {
+    if (
+      Object.keys(value).some(
+        (key) => !['operation', 'operationId', 'expectedRequestId', 'input'].includes(key)
+      ) ||
+      typeof value.operationId !== 'string' ||
+      !uuidPattern.test(value.operationId) ||
+      typeof value.expectedRequestId !== 'string' ||
+      !uuidPattern.test(value.expectedRequestId)
+    )
+      throw new HttpError(400, '安全重试请求格式有误', 'INVALID_INPUT')
+    return {
+      operation: 'operation-retry',
+      operationId: value.operationId,
+      expectedRequestId: value.expectedRequestId,
+      input: scalarRecord(value.input, '安全重试输入')
+    }
+  }
   if (
     value.operation !== 'invoke' ||
     Object.keys(value).some(
@@ -583,12 +675,131 @@ export function parseProBridgeInvocation(value: unknown): ProBridgeInvocation {
     )
   )
     throw new HttpError(400, '桥接调用内容格式有误', 'INVALID_INPUT')
-  const invocation = value as ProBridgeInvocation
+  const invocation = value as ProBridgeInvoke
   bridgeRequest(invocation)
   return invocation
 }
 
 type GatewayPrincipal = { kind: 'cookie'; session: Session } | { kind: 'bridge'; member: Member }
+
+function operationMetadata(value: ReturnType<typeof asGatewayKind>): Record<string, unknown> {
+  return {
+    ...(value.operationId ? { operationId: value.operationId } : {}),
+    ...(value.attemptNo ? { attemptNo: value.attemptNo } : {}),
+    ...(value.dispatchState ? { dispatchState: value.dispatchState } : {}),
+    ...(typeof value.retryAllowed === 'boolean' ? { retryAllowed: value.retryAllowed } : {})
+  }
+}
+
+function operationLookup(
+  member: Member,
+  lookup: Extract<ProBridgeInvocation, { operation: 'operation-status' }>['lookup']
+) {
+  if (lookup.idempotencyKey)
+    return {
+      idempotencyHash: digest(
+        `${member.tenant_id}\0${member.id}\0${lookup.idempotencyKey.toLowerCase()}`
+      )
+    }
+  if (lookup.operationId) return { operationId: lookup.operationId }
+  return { requestId: lookup.requestId }
+}
+
+async function bridgeOperationRead(
+  member: Member,
+  invocation: Extract<ProBridgeInvocation, { operation: 'operation-list' | 'operation-status' }>
+): Promise<unknown> {
+  if (invocation.operation === 'operation-list') {
+    const result = await database.rpc(
+      'bff_gateway_operation_list',
+      { p_actor: member.id, p_filters: invocation.filters },
+      { get: true }
+    )
+    rpcFailure(result.error)
+    if (!isObjectRecord(result.data))
+      throw new HttpError(503, '调用记录暂不可用', 'GATEWAY_UNAVAILABLE')
+    return result.data
+  }
+  const result = await database.rpc(
+    'bff_gateway_operation_status',
+    { p_actor: member.id, p_lookup: operationLookup(member, invocation.lookup) },
+    { get: true }
+  )
+  rpcFailure(result.error)
+  if (!isObjectRecord(result.data))
+    throw new HttpError(503, '调用状态暂不可用', 'GATEWAY_UNAVAILABLE')
+  const response: Record<string, unknown> = { operation: result.data.operation ?? null }
+  if (
+    typeof result.data.resultPayload === 'string' &&
+    isObjectRecord(result.data.publication) &&
+    isObjectRecord(result.data.operation) &&
+    typeof result.data.operation.requestId === 'string'
+  ) {
+    try {
+      const execution = publishedExecution(result.data.publication)
+      response.result = openGatewayReplayForMember(
+        member,
+        execution,
+        result.data.operation.requestId,
+        result.data.resultPayload
+      )
+    } catch {
+      throw new HttpError(503, '历史调用结果暂不可用，请联系管理员', 'REPLAY_UNAVAILABLE')
+    }
+  }
+  return response
+}
+
+async function retryBridgeInvocation(
+  member: Member,
+  request: Extract<ProBridgeInvocation, { operation: 'operation-retry' }>
+): Promise<{
+  invocation: ProBridgeInvoke
+  retry: { operationId: string; expectedRequestId: string }
+}> {
+  const result = await database.rpc(
+    'bff_gateway_retry_context',
+    {
+      p_actor: member.id,
+      p_operation: request.operationId,
+      p_expected_request: request.expectedRequestId
+    },
+    { get: true }
+  )
+  rpcFailure(result.error)
+  if (!isObjectRecord(result.data) || !isObjectRecord(result.data.publication))
+    throw new HttpError(409, '当前调用已不能安全重试，请刷新状态', 'RETRY_NOT_ALLOWED')
+  const execution = publishedExecution(result.data.publication)
+  const applicationCode = result.data.applicationCode
+  if (typeof applicationCode !== 'string' || !appCodePattern.test(applicationCode))
+    throw new HttpError(503, '安全重试上下文暂不可用', 'GATEWAY_UNAVAILABLE')
+  const query: Record<string, InterfaceScalar> = {}
+  const bodyValues: Record<string, InterfaceScalar> = {}
+  let path = execution.path
+  for (const field of execution.definition.inputs) {
+    const value = request.input[field.key]
+    if (value === undefined || value === null) continue
+    if (field.location === 'path')
+      path = path.replaceAll(`{${field.key}}`, encodeURIComponent(String(value)))
+    else if (field.location === 'query') query[field.key] = value
+    else bodyValues[field.key] = value
+  }
+  if (/\{[^}]+\}/.test(path))
+    throw new HttpError(400, '安全重试输入缺少必填路径参数', 'INVALID_INPUT')
+  return {
+    invocation: {
+      operation: 'invoke',
+      applicationCode,
+      environment: execution.environment,
+      path,
+      method: execution.method,
+      query,
+      body: bodyValues,
+      idempotencyKey: request.operationId
+    },
+    retry: { operationId: request.operationId, expectedRequestId: request.expectedRequestId }
+  }
+}
 
 /** Always responds with a server request ID. The caller has already authenticated the BFF session. */
 export async function handleGateway(
@@ -636,6 +847,43 @@ export async function handleBridgeGateway(
     }
     return
   }
+  if (invocation.operation === 'operation-list' || invocation.operation === 'operation-status') {
+    res.setHeader('X-Request-Id', requestId)
+    try {
+      json(res, await bridgeOperationRead(member, invocation))
+    } catch (error) {
+      const known = error instanceof HttpError
+      const message = known ? error.message : '调用状态暂不可用，请稍后重试'
+      json(
+        res,
+        { code: known ? error.code : 'GATEWAY_UNAVAILABLE', message, msg: message, requestId },
+        known ? error.status : 503
+      )
+    }
+    return
+  }
+  if (invocation.operation === 'operation-retry') {
+    try {
+      const retry = await retryBridgeInvocation(member, invocation)
+      await gatewayCore(
+        req,
+        res,
+        { kind: 'bridge', member },
+        retry.invocation,
+        requestId,
+        retry.retry
+      )
+    } catch (error) {
+      const known = error instanceof HttpError
+      const message = known ? error.message : '安全重试暂不可用，请稍后重试'
+      json(
+        res,
+        { code: known ? error.code : 'GATEWAY_UNAVAILABLE', message, msg: message, requestId },
+        known ? error.status : 503
+      )
+    }
+    return
+  }
   await gatewayCore(req, res, { kind: 'bridge', member }, invocation, requestId)
 }
 
@@ -643,12 +891,16 @@ async function gatewayCore(
   req: IncomingMessage,
   res: ServerResponse,
   principal: GatewayPrincipal,
-  invocation: ProBridgeInvocation | undefined,
-  initialRequestId: string
+  invocation: ProBridgeInvoke | undefined,
+  initialRequestId: string,
+  retry?: { operationId: string; expectedRequestId: string }
 ): Promise<void> {
   const member = principal.kind === 'cookie' ? principal.session.member : principal.member
   let requestId = uuidPattern.test(initialRequestId) ? initialRequestId : randomUUID()
-  let writeStarted = false
+  let dispatchPossible = false
+  let begun: ReturnType<typeof asGatewayKind> | undefined
+  let finishRecorded = false
+  let beginAttemptAt = Date.now()
   res.setHeader('X-Request-Id', requestId)
   try {
     const bridged = principal.kind === 'bridge' && invocation ? bridgeRequest(invocation) : null
@@ -710,21 +962,24 @@ async function gatewayCore(
       route.method === 'GET' || typeof idempotencyKey !== 'string'
         ? null
         : digest(`${member.tenant_id}\0${member.id}\0${idempotencyKey.toLowerCase()}`)
-    const beginAttemptAt = Date.now()
+    beginAttemptAt = Date.now()
     const executionDeadline = beginAttemptAt + 30_000
     const begunResult = await database
-      .rpc('bff_gateway_begin', {
+      .rpc('bff_gateway_begin_v2', {
         p_actor: member.id,
         p_interface: execution.interfaceId,
         p_version_id: execution.versionId,
         p_deployment_version: execution.deploymentVersion,
         p_request_id: requestId,
         p_idempotency_hash: idempotencyHash,
-        p_input_hash: inputHash
+        p_input_hash: inputHash,
+        p_retry_of_request_id: retry?.expectedRequestId ?? null,
+        p_operation_id: retry?.operationId ?? null,
+        p_legacy: false
       })
       .abortSignal(AbortSignal.timeout(30_000))
     rpcFailure(begunResult.error)
-    const begun = asGatewayKind(begunResult.data)
+    begun = asGatewayKind(begunResult.data)
     requestId = begun.requestId
     res.setHeader('X-Request-Id', requestId)
     if (begun.versionNumber !== execution.versionNumber)
@@ -736,7 +991,8 @@ async function gatewayCore(
           code: 'IN_PROGRESS',
           message: '相同请求正在执行，请稍后查询结果',
           msg: '相同请求正在执行，请稍后查询结果',
-          requestId
+          requestId,
+          ...operationMetadata(begun)
         },
         202
       )
@@ -744,6 +1000,16 @@ async function gatewayCore(
     }
     if (begun.kind === 'unknown')
       throw new HttpError(409, '原请求结果未确认；请根据请求编号核对结果后再操作', 'RESULT_UNKNOWN')
+    if (begun.kind === 'failed')
+      throw new HttpError(
+        409,
+        begun.retryAllowed
+          ? '原请求确认未发送上游，可在调用记录中手动安全重试'
+          : '原请求已失败且不能安全重试，请查看调用记录',
+        begun.retryAllowed ? 'SAFE_RETRY_AVAILABLE' : 'RETRY_NOT_ALLOWED'
+      )
+    if (begun.kind === 'completed')
+      throw new HttpError(409, '原请求已完成，但结果缓存已经过期；请查看调用记录', 'RESULT_EXPIRED')
     if (begun.kind === 'replay') {
       if (!begun.resultPayload)
         throw new HttpError(503, '历史调用结果暂不可用，请联系管理员', 'REPLAY_UNAVAILABLE')
@@ -753,10 +1019,9 @@ async function gatewayCore(
       } catch {
         throw new HttpError(503, '历史调用结果暂不可用，请联系管理员', 'REPLAY_UNAVAILABLE')
       }
-      json(res, replay)
+      json(res, { ...replay, ...operationMetadata(begun) })
       return
     }
-    writeStarted = route.method !== 'GET'
 
     const observations = new Map<string, ReleaseUpstreamObservation>()
     const budget = (requestedMs = 30_000): number => {
@@ -823,7 +1088,31 @@ async function gatewayCore(
       },
       input,
       loadTarget,
-      { preflight: loadTargets }
+      {
+        preflight: loadTargets,
+        beforeDispatch:
+          route.method === 'GET'
+            ? undefined
+            : async () => {
+                // A lost marker response may have committed. From this point local handling is conservative.
+                dispatchPossible = true
+                const marked = await database
+                  .rpc('bff_gateway_mark_dispatch', {
+                    p_actor: member.id,
+                    p_request_id: requestId
+                  })
+                  .abortSignal(AbortSignal.timeout(budget(5000)))
+                rpcFailure(marked.error)
+                if (!isObjectRecord(marked.data) || marked.data.allowed !== true)
+                  throw new HttpError(
+                    409,
+                    '调用租约或权限已变化，已阻止发送上游请求',
+                    'DISPATCH_REJECTED'
+                  )
+                if (Date.now() >= executionDeadline)
+                  throw new HttpError(504, '调用时间已用尽，已阻止发送上游请求', 'RESULT_UNKNOWN')
+              }
+      }
     )
     const passed = executionResult.passed
     const gatewayResponse: GatewayResponse = {
@@ -831,11 +1120,12 @@ async function gatewayCore(
       version: execution.versionNumber,
       code: 200,
       msg: '成功',
-      data: executionResult.output
+      data: executionResult.output,
+      ...operationMetadata(begun)
     }
     const status = passed ? 200 : 502
     const finished = await database
-      .rpc('bff_gateway_finish', {
+      .rpc('bff_gateway_finish_v2', {
         p_actor: member.id,
         p_request_id: requestId,
         p_success: passed,
@@ -858,30 +1148,80 @@ async function gatewayCore(
       })
       .abortSignal(AbortSignal.timeout(10_000))
     rpcFailure(finished.error)
+    finishRecorded = true
     if (!isObjectRecord(finished.data) || typeof finished.data.stale !== 'boolean')
       throw new HttpError(503, '调用结果暂不可确认，请稍后核对', 'RESULT_UNKNOWN')
     if (finished.data.stale)
       throw new HttpError(409, '发布或权限状态已变化，请根据请求编号核对调用结果', 'RESULT_UNKNOWN')
-    if (!passed)
-      throw new HttpError(502, '上游调用未完成，请根据请求编号核对调用日志', 'UPSTREAM_FAILED')
+    const operation = isObjectRecord(finished.data.operation) ? finished.data.operation : undefined
+    if (!passed) {
+      if (operation?.retryAllowed === true)
+        throw new HttpError(
+          502,
+          '请求确认未发送上游，可在调用记录中手动安全重试',
+          'SAFE_RETRY_AVAILABLE'
+        )
+      throw new HttpError(409, '上游可能已执行，请根据请求编号核对结果后再操作', 'RESULT_UNKNOWN')
+    }
     json(res, gatewayResponse)
   } catch (error) {
-    const known = error instanceof HttpError
-    const resultUnknown = writeStarted
-    const message = resultUnknown
-      ? '上游可能已执行，请根据请求编号核对结果后再操作'
-      : known
-        ? error.message
-        : '网关暂时无法完成调用，请稍后重试'
+    let resolved = error
+    let operation: Record<string, unknown> | undefined = begun?.operation
+    if (begun?.kind === 'started' && !finishRecorded) {
+      try {
+        const ended = await database
+          .rpc('bff_gateway_finish_v2', {
+            p_actor: member.id,
+            p_request_id: requestId,
+            p_success: false,
+            p_http_status: error instanceof HttpError ? error.status : 503,
+            p_duration_ms: Math.min(60_000, Math.max(0, Date.now() - beginAttemptAt)),
+            p_error_code: gatewayStepCode(
+              error instanceof HttpError ? error.code : 'GATEWAY_UNAVAILABLE'
+            ),
+            p_steps: [],
+            p_result_payload: null,
+            p_upstream_versions: [],
+            p_error_class: dispatchPossible ? 'unknown' : 'validation'
+          })
+          .abortSignal(AbortSignal.timeout(10_000))
+        rpcFailure(ended.error)
+        if (isObjectRecord(ended.data) && isObjectRecord(ended.data.operation)) {
+          operation = ended.data.operation
+          if (operation.retryAllowed === true)
+            resolved = new HttpError(
+              502,
+              '请求确认未发送上游，可在调用记录中手动安全重试',
+              'SAFE_RETRY_AVAILABLE'
+            )
+          else if (operation.status === 'unknown')
+            resolved = new HttpError(
+              409,
+              '上游可能已执行，请根据请求编号核对结果后再操作',
+              'RESULT_UNKNOWN'
+            )
+        }
+      } catch {
+        if (dispatchPossible)
+          resolved = new HttpError(
+            409,
+            '上游可能已执行，请根据请求编号核对结果后再操作',
+            'RESULT_UNKNOWN'
+          )
+      }
+    }
+    const knownError = resolved instanceof HttpError ? resolved : undefined
+    const message = knownError?.message ?? '网关暂时无法完成调用，请稍后重试'
     json(
       res,
       {
-        code: resultUnknown ? 'RESULT_UNKNOWN' : known ? error.code : 'GATEWAY_UNAVAILABLE',
+        code: knownError?.code ?? 'GATEWAY_UNAVAILABLE',
         message,
         msg: message,
-        requestId
+        requestId,
+        ...(operation ?? (begun ? operationMetadata(begun) : {}))
       },
-      resultUnknown ? 409 : known ? error.status : 503
+      knownError?.status ?? 503
     )
   }
 }

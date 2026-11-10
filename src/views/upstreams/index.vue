@@ -14,7 +14,8 @@
       <template #actions
         ><BffFlowGuide
           :step="1"
-          :application-id="filters.applicationId" /><BusinessTableWorkspaceActions
+          :application-id="filters.applicationId"
+          :environment="filters.environment" /><BusinessTableWorkspaceActions
           :table="tableQueryRef"
       /></template>
     </BusinessWorkspaceHeader>
@@ -168,31 +169,38 @@
   const filters = ref({
     applicationId: typeof route.query.applicationId === 'string' ? route.query.applicationId : '',
     name: '',
-    environment: '',
+    environment:
+      route.query.environment === 'development' ||
+      route.query.environment === 'staging' ||
+      route.query.environment === 'production'
+        ? route.query.environment
+        : '',
     status: ''
   })
-  watch(
-    () => route.query.applicationId,
-    (value) => {
-      filters.value.applicationId = typeof value === 'string' ? value : ''
-      void tableQueryRef.value?.refreshCreate()
-    }
-  )
   const locatedRecordId = computed(() =>
     typeof route.query.recordId === 'string' ? route.query.recordId : ''
   )
   const locatedRecordLabel = computed(
     () => visibleRecords.value.find((row) => row.id === locatedRecordId.value)?.name || '指定服务'
   )
-  watch(locatedRecordId, () => {
-    filters.value = {
-      applicationId: typeof route.query.applicationId === 'string' ? route.query.applicationId : '',
-      name: '',
-      environment: '',
-      status: ''
+  watch(
+    () => [route.query.applicationId, route.query.environment, locatedRecordId.value],
+    ([applicationId, environment, recordId], previous) => {
+      const scope = {
+        applicationId: typeof applicationId === 'string' ? applicationId : '',
+        environment:
+          environment === 'development' || environment === 'staging' || environment === 'production'
+            ? environment
+            : ''
+      }
+      filters.value =
+        recordId !== previous?.[2]
+          ? { ...filters.value, ...scope, name: '', status: '' }
+          : { ...filters.value, ...scope }
+      tableQueryRef.value?.cancelRequest()
+      void nextTick(() => tableQueryRef.value?.getData())
     }
-    void tableQueryRef.value?.refreshCreate()
-  })
+  )
   function clearLocate(): void {
     void router.replace({ query: { ...route.query, recordId: undefined }, hash: route.hash })
   }
@@ -383,7 +391,7 @@
       ElMessage.warning('请先在应用管理中登记并启用一个应用')
       return
     }
-    await upstreamDialogRef.value?.handleOpen(currentOptions)
+    await upstreamDialogRef.value?.handleOpen(currentOptions, undefined, false, filters.value)
   }
 
   function openEdit(row: UpstreamService): void {
@@ -418,6 +426,12 @@
     const canActivate =
       canTest && row.application.enabled && (row.authType === 'none' || row.credentialConfigured)
     return [
+      {
+        key: 'interfaces',
+        label: '配置接口',
+        icon: 'ri:flow-chart',
+        auth: 'BffInterface:View'
+      },
       {
         key: 'credential',
         label: '管理凭据',
@@ -521,6 +535,11 @@
   }
 
   function handleMoreClick(item: ButtonMoreItem, row: UpstreamService): void {
+    if (item.key === 'interfaces' && hasAuth('BffInterface:View'))
+      void router.push({
+        name: 'BffInterfaces',
+        query: { applicationId: row.applicationId, environment: row.environment }
+      })
     if (item.key === 'credential') void credentialDialogRef.value?.handleOpen(row)
     if (item.key === 'status') void handleStatus(row)
     if (item.key === 'test') void handleTest(row)
@@ -641,7 +660,8 @@
       hasAuth('BffUpstream:ChangeStatus') ||
       hasAuth('BffUpstream:RotateSecret') ||
       hasAuth('BffUpstream:Test') ||
-      hasAuth('BffUpstream:Delete')
+      hasAuth('BffUpstream:Delete') ||
+      hasAuth('BffInterface:View')
         ? [
             {
               prop: 'actions',
